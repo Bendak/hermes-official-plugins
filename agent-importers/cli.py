@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import sys
 from pathlib import Path
 from typing import Any, Optional
@@ -23,7 +24,7 @@ _ANSI = {"green": "\033[32m", "yellow": "\033[33m", "red": "\033[31m", "dim": "\
 
 
 def _color(text: str, name: str) -> str:
-    return f"{_ANSI[name]}{text}\033[0m" if sys.stdout.isatty() else text
+    return f"{_ANSI[name]}{text}\033[0m" if sys.stdout.isatty() and not os.environ.get("NO_COLOR") else text
 
 
 def _dirs_hint() -> str:

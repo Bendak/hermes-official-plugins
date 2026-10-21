@@ -386,6 +386,17 @@ class TestCursorImport:
         assert snapshot_tree(hermes_home) == before
         assert report["summary"]["imported"] > 0
 
+    def test_symlinked_skill_folder_is_imported(self, cursor_tree, hermes_home, tmp_path):
+        shared = tmp_path / "shared" / "review"
+        shared.mkdir(parents=True)
+        (shared / "SKILL.md").write_text("---\nname: review\n---\n\nReview.\n", encoding="utf-8")
+        try:
+            (cursor_tree / "skills" / "linked").symlink_to(shared.parent, target_is_directory=True)
+        except OSError:  # Windows without the symlink privilege
+            pytest.skip("symlinks unavailable")
+        run_import("cursor", cursor_tree, hermes_home, execute=True)
+        assert (hermes_home / "skills" / "cursor-imports" / "review" / "SKILL.md").exists()
+
     def test_duplicate_nested_skill_name_conflicts(self, cursor_tree, hermes_home):
         dup = cursor_tree / "skills" / "debugging" / "tdd"
         dup.mkdir(parents=True)
@@ -478,6 +489,18 @@ class TestMergeSemantics:
             for i in report["items"]
         )
 
+
+    def test_overwrite_replaces_an_existing_mcp_server_entry(self, claude_tree, hermes_home):
+        """--overwrite swaps in the imported shape even when the existing entry has keys it lacks."""
+        (hermes_home / "config.yaml").write_text(
+            "model: keep-me\nmcp_servers:\n  github:\n    command: old\n    timeout: 30\n", encoding="utf-8")
+        report = run_import("claude-code", claude_tree, hermes_home, execute=True, overwrite=True)
+        assert report["summary"]["error"] == 0
+        config = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
+        assert config["model"] == "keep-me"
+        assert config["mcp_servers"]["github"]["command"] == "npx"
+        assert "timeout" not in config["mcp_servers"]["github"]
+        assert (hermes_home / "skills" / "claude-code-imports" / "deploy-helper" / "SKILL.md").exists()
 
     def test_existing_skill_conflicts_without_overwrite(
             self, claude_tree, hermes_home):

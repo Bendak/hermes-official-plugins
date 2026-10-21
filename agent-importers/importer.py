@@ -53,11 +53,24 @@ def read_text(path: Path) -> str:
     return path.read_text(encoding="utf-8-sig", errors="replace")
 
 
+def _umask() -> int:
+    current = os.umask(0)
+    os.umask(current)
+    return current
+
+
 def atomic_write_text(path: Path, content: str) -> None:
-    """Temp file + fsync + rename in the target's directory; a symlinked target keeps its link."""
+    """Temp file + fsync + rename in the target's directory; a symlinked target keeps its link.
+    An existing file keeps its permission bits; a new one gets the umask's (mkstemp alone would
+    make it 0600, which breaks shared-volume setups)."""
     target = Path(os.path.realpath(path))
+    try:
+        mode = target.stat().st_mode & 0o777
+    except FileNotFoundError:
+        mode = 0o666 & ~_umask()
     fd, tmp = tempfile.mkstemp(dir=target.parent, prefix=".tmp_")
     try:
+        os.chmod(tmp, mode)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(content)
             handle.flush()
@@ -84,9 +97,11 @@ def load_config_file(path: Path) -> dict[str, Any]:
 
 
 def write_config_file(path: Path, data: dict[str, Any]) -> None:
-    """Comment-preserving atomic write; only reached after :func:`load_config_file` succeeded."""
-    from hermes_cli.config import atomic_config_write
-    atomic_config_write(path, data)
+    """Comment-preserving atomic write of the whole mapping :func:`load_config_file` returned plus
+    the import's changes. A full replace, because ``--overwrite`` deliberately replaces an MCP
+    server entry, dropping keys the imported shape lacks."""
+    from hermes_cli.config import atomic_config_replace
+    atomic_config_replace(path, data)
 
 
 def extract_markdown_entries(text: str) -> list[str]:
@@ -238,13 +253,22 @@ def cursor_rule_files(rules_dir: Path) -> list[Path]:
 
 
 def nested_skill_dirs(source_root: Path) -> list[Path]:
-    """Folders holding a ``SKILL.md`` at any depth below ``source_root``, outermost first; a
-    ``SKILL.md`` inside another skill's folder belongs to that skill, not a new one."""
+    """Folders holding a ``SKILL.md`` at any depth below ``source_root``; a ``SKILL.md`` inside
+    another skill's folder belongs to that skill, not a new one. Symlinked folders are followed
+    (a skill shared from another agent's tree is linked in), each real folder once."""
     found: list[Path] = []
-    for path in sorted(source_root.rglob("SKILL.md"), key=lambda p: (len(p.parts), p)):
-        folder = path.parent
-        if folder != source_root and not any(folder.is_relative_to(f) for f in found):
+    seen: set[str] = set()
+    for dirpath, dirnames, filenames in os.walk(source_root, followlinks=True):
+        real = os.path.realpath(dirpath)
+        folder = Path(dirpath)
+        if real in seen:
+            dirnames.clear()
+            continue
+        seen.add(real)
+        dirnames.sort()
+        if folder != source_root and "SKILL.md" in filenames:
             found.append(folder)
+            dirnames.clear()  # the rest of this tree belongs to the skill
     return sorted(found)
 
 
