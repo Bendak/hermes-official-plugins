@@ -22,8 +22,8 @@ from unittest.mock import patch
 import pytest
 
 from tools.environments.base import get_sandbox_dir
-from tools.environments import bubblewrap
-from tools.environments.bubblewrap import (
+from bubblewrap_plugin import sandbox as bubblewrap
+from bubblewrap_plugin.sandbox import (
     BindMount,
     BubblewrapConfig,
     BubblewrapEnvironment,
@@ -630,13 +630,13 @@ class TestInitialCwdGuard:
     @pytest.mark.parametrize("which", ["home", "parent-of-home"])
     def test_home_or_its_ancestor_as_cwd_warns(self, sandbox_root, fake_home, caplog, which):
         cwd = fake_home if which == "home" else fake_home.parent
-        with caplog.at_level(logging.WARNING, logger="tools.environments.bubblewrap"), _no_session():
+        with caplog.at_level(logging.WARNING, logger="bubblewrap_plugin.sandbox"), _no_session():
             env = BubblewrapEnvironment(cwd=str(cwd), timeout=10)
         env.cleanup()
         assert any("covers the home directory" in r.getMessage() for r in caplog.records)
 
     def test_project_dir_as_cwd_is_silent(self, sandbox_root, fake_home, work_dir, caplog):
-        with caplog.at_level(logging.WARNING, logger="tools.environments.bubblewrap"), _no_session():
+        with caplog.at_level(logging.WARNING, logger="bubblewrap_plugin.sandbox"), _no_session():
             env = BubblewrapEnvironment(cwd=str(work_dir), timeout=10)
         env.cleanup()
         assert not any("covers the home directory" in r.getMessage() for r in caplog.records)
@@ -1064,7 +1064,7 @@ class TestMaskedInside:
         assert env.cwd == str(p["work"] / "sub")
         masked = str(p["hermes_home"] / "logs")
         env.cwd = masked
-        with caplog.at_level(logging.WARNING, logger="tools.environments.bubblewrap"):
+        with caplog.at_level(logging.WARNING, logger="bubblewrap_plugin.sandbox"):
             note = env._reset_masked_cwd()
         assert env.cwd == str(p["work"])
         assert masked in note and str(p["work"]) in note
@@ -1158,17 +1158,17 @@ class TestBindsFrozenAtConstruction:
             BindMount(src=str(home), dest="/mnt"),
             BindMount(src=str(work_dir), dest="/proj"),
         ))
-        with caplog.at_level(logging.WARNING, logger="tools.environments.bubblewrap"), _no_session():
+        with caplog.at_level(logging.WARNING, logger="bubblewrap_plugin.sandbox"), _no_session():
             env = BubblewrapEnvironment(cwd=str(work_dir), timeout=10, config=config)
         try:
-            dropped = [r.getMessage() for r in caplog.records if "Ignoring terminal.bubblewrap_binds" in r.getMessage()]
+            dropped = [r.getMessage() for r in caplog.records if "Ignoring plugins.entries.bubblewrap.settings.binds" in r.getMessage()]
             assert len(dropped) == 2
             assert any("/keys" in m or str(home / ".ssh") in m for m in dropped)
             assert any("/mnt" in m for m in dropped)
             caplog.clear()
             for _ in range(5):
                 argv = env._wrap_popen_args(["bash"])
-            assert [r for r in caplog.records if "bubblewrap_binds" in r.getMessage()] == []
+            assert [r for r in caplog.records if "settings.binds" in r.getMessage()] == []
             assert (str(work_dir), "/proj") in [m[1:] for m in _mounts(argv) if m[0] == "--ro-bind"]
             assert [b.dest for b in env._config.binds] == ["/proj"]
         finally:
@@ -1181,13 +1181,13 @@ class TestBindsFrozenAtConstruction:
         (home / "data").mkdir(parents=True)
         monkeypatch.setenv("HOME", str(home))
         config = BubblewrapConfig(binds=(BindMount(src="~/data", dest="/data"), BindMount(src="~", dest="/mnt")))
-        with caplog.at_level(logging.WARNING, logger="tools.environments.bubblewrap"), _no_session():
+        with caplog.at_level(logging.WARNING, logger="bubblewrap_plugin.sandbox"), _no_session():
             env = BubblewrapEnvironment(cwd=str(work_dir), timeout=10, config=config)
         try:
             assert [(b.src, b.dest) for b in env._config.binds] == [(str(home / "data"), "/data")]
             assert (str(home / "data"), "/data") in [m[1:] for m in _mounts(env._wrap_popen_args(["bash"])) if m[0] == "--ro-bind"]
             assert "~" not in env._wrap_popen_args(["bash"])
-            assert any("Ignoring terminal.bubblewrap_binds entry ~ ->" in r.getMessage() for r in caplog.records)
+            assert any("Ignoring plugins.entries.bubblewrap.settings.binds entry ~ ->" in r.getMessage() for r in caplog.records)
         finally:
             env.cleanup()
 
@@ -1244,7 +1244,7 @@ class TestBindSourceGuard:
 
     @staticmethod
     def _refused(work_dir, config, sandbox_root):
-        with _no_session(), pytest.raises(ValueError, match="terminal.bubblewrap_binds") as exc:
+        with _no_session(), pytest.raises(ValueError, match="plugins.entries.bubblewrap.settings.binds") as exc:
             BubblewrapEnvironment(cwd=str(work_dir), timeout=10, config=config)
         assert "dest equal to src" in str(exc.value)
         assert not sandbox_root.exists() or not any(sandbox_root.iterdir())
@@ -1472,7 +1472,7 @@ class TestRuntimeDirAndDockerSocketMasked:
             os.unlink(path)
 
     def test_docker_socket_is_a_plain_empty_file_inside(self, env):
-        from tools.environments.bubblewrap import DOCKER_SOCKETS
+        from bubblewrap_plugin.sandbox import DOCKER_SOCKETS
 
         present = [s for s in DOCKER_SOCKETS if os.path.exists(s)]
         if not present:

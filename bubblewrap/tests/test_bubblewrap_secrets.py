@@ -22,8 +22,8 @@ from unittest.mock import patch
 
 import pytest
 
-from tools.environments import bubblewrap
-from tools.environments.bubblewrap import (
+from bubblewrap_plugin import sandbox as bubblewrap
+from bubblewrap_plugin.sandbox import (
     SENSITIVE_HOME_PATHS,
     BindMount,
     BubblewrapConfig,
@@ -507,7 +507,7 @@ class TestHomeModeCarveOut:
     def test_home_mode_defaults_to_auto_and_reads_terminal_home_mode(self):
         assert BubblewrapConfig().home_mode == "auto"
         assert load_bubblewrap_config({}).home_mode == "auto"
-        assert load_bubblewrap_config({"TERMINAL_HOME_MODE": " Profile "}).home_mode == "profile"
+        assert load_bubblewrap_config({}, " Profile ").home_mode == "profile"
 
     @pytest.mark.parametrize("mode", ["profile", "isolated", "profile_home", "profile-home"])
     def test_home_mode_profile_binds_profile_home_between_overlay_and_state_dir(self, paths, mode):

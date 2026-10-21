@@ -14,16 +14,15 @@ stays green.
 
 import inspect
 import json
-import os
 import shutil
 import subprocess
 from unittest.mock import patch
 
 import pytest
 
-from tools.environments import bubblewrap
+from bubblewrap_plugin import sandbox as bubblewrap
 from tools.environments.base import EnvironmentConnectionError
-from tools.environments.bubblewrap import (
+from bubblewrap_plugin.sandbox import (
     INSTALL_HINT,
     PROBE_ARGS,
     BubblewrapEnvironment,
@@ -218,9 +217,10 @@ class TestConstructionFailures:
 
 
 @pytest.fixture
-def isolated_tool(tmp_path, monkeypatch):
-    """terminal_tool with backend=bubblewrap, an isolated HERMES_HOME and a
-    clean environment cache; the real factory constructs the environment."""
+def isolated_tool(tmp_path, monkeypatch, bwrap_provider):
+    """terminal_tool with backend=bubblewrap (the plugin's provider registered),
+    an isolated HERMES_HOME and a clean environment cache; the real factory
+    constructs the environment."""
     import tools.terminal_tool as tt
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
@@ -262,9 +262,11 @@ class TestDegradedModePath:
 
 
 class TestEverySpawnIsWrapped:
-    def test_backend_module_spawns_nothing_but_the_probe(self):
+    def test_backend_module_spawns_only_the_probe_and_the_wrapped_shell(self):
+        # One Popen, in the _run_bash override that wraps every shell argv; one run(), the probe.
         source = inspect.getsource(bubblewrap)
-        assert "Popen(" not in source
+        assert source.count("Popen(") == 1
+        assert "Popen(" in inspect.getsource(BubblewrapEnvironment._run_bash)
         assert source.count("subprocess.run(") == 1
         assert "subprocess.run(" in inspect.getsource(run_probe)
 

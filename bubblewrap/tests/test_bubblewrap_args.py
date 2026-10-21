@@ -1,4 +1,4 @@
-"""Unit tests for the pure bwrap argv builder in tools.environments.bubblewrap.
+"""Unit tests for the pure bwrap argv builder in the plugin's sandbox module.
 
 The builder never touches the host: every path is passed in, so these tests
 run on any platform, with or without bwrap installed.
@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.environments.bubblewrap import (
+from bubblewrap_plugin.sandbox import (
     BindMount,
     BubblewrapConfig,
     PROFILE_NAMES,
@@ -175,7 +175,7 @@ class TestExtraBinds:
     def test_sensitive_bind_dropped_with_warning(self, paths, tmp_path, caplog):
         plain = BindMount(src=str(tmp_path / "data"), dest=str(tmp_path / "data"), readonly=False)
         secret = BindMount(src=str(Path(paths["home"]) / ".ssh" / "keys"), dest="/keys", readonly=True)
-        with caplog.at_level(logging.WARNING, logger="tools.environments.bubblewrap"):
+        with caplog.at_level(logging.WARNING, logger="bubblewrap_plugin.sandbox"):
             argv = build(BubblewrapConfig(binds=(plain, secret)), paths=paths)
         baseline = build(paths=paths)
         extra_pairs = (len(triples(argv, "--bind")) + len(triples(argv, "--ro-bind"))) - (
@@ -195,7 +195,7 @@ class TestExtraBinds:
 
     def test_hermes_home_bind_dropped(self, paths, caplog):
         src = str(Path(paths["hermes_home"]) / "config.yaml")
-        with caplog.at_level(logging.WARNING, logger="tools.environments.bubblewrap"):
+        with caplog.at_level(logging.WARNING, logger="bubblewrap_plugin.sandbox"):
             argv = build(BubblewrapConfig(binds=(BindMount(src=src, dest="/cfg"),)), paths=paths)
         assert (src, "/cfg") not in triples(argv, "--ro-bind")
         assert any(src in rec.getMessage() for rec in caplog.records)
@@ -215,10 +215,10 @@ class TestExtraBinds:
 
     @pytest.mark.parametrize("readonly", [True, False])
     def test_bind_containing_a_hidden_path_mapped_elsewhere_is_dropped(self, paths, readonly, caplog):
-        # A mirror of HOME at /mnt would show ~/.ssh at /mnt/.ssh: the overlays
+        # A mirror of HOME at /mnt would show HOME/.ssh at /mnt/.ssh: the overlays
         # cover the hidden paths only at their own location.
         home = paths["home"]
-        with caplog.at_level(logging.WARNING, logger="tools.environments.bubblewrap"):
+        with caplog.at_level(logging.WARNING, logger="bubblewrap_plugin.sandbox"):
             argv = build(BubblewrapConfig(binds=(BindMount(src=home, dest="/mnt", readonly=readonly),)), paths=paths)
         assert not any(dest == "/mnt" for _, dest in triples(argv, "--ro-bind") + triples(argv, "--bind"))
         messages = [rec.getMessage() for rec in caplog.records if rec.levelno >= logging.WARNING]
@@ -244,23 +244,24 @@ class TestExtraBinds:
 
 
 class TestLoadConfig:
-    def test_defaults_when_env_is_empty(self):
+    def test_defaults_when_settings_are_empty(self):
         config = load_bubblewrap_config({})
         assert config.profile == "network"
         assert config.binds == ()
         assert config.memory_mb == 256
         assert config.cpu_seconds == 30
         assert config.max_procs == 256
+        assert load_bubblewrap_config(None) == BubblewrapConfig()
 
-    def test_reads_every_terminal_bubblewrap_env_name(self):
-        env = {
-            "TERMINAL_BUBBLEWRAP_PROFILE": "restricted",
-            "TERMINAL_BUBBLEWRAP_BINDS": '[{"src": "/data", "dest": "/mnt/data", "readonly": false}, {"src": "/ref"}]',
-            "TERMINAL_BUBBLEWRAP_MEMORY_MB": "512",
-            "TERMINAL_BUBBLEWRAP_CPU_SECONDS": "0",
-            "TERMINAL_BUBBLEWRAP_MAX_PROCS": "64",
+    def test_reads_every_setting(self):
+        settings = {
+            "profile": "restricted",
+            "binds": [{"src": "/data", "dest": "/mnt/data", "readonly": False}, {"src": "/ref"}],
+            "memory_mb": 512,
+            "cpu_seconds": 0,
+            "max_procs": "64",
         }
-        config = load_bubblewrap_config(env)
+        config = load_bubblewrap_config(settings)
         assert config.profile == "restricted"
         assert config.binds == (
             BindMount(src="/data", dest="/mnt/data", readonly=False),
@@ -270,32 +271,35 @@ class TestLoadConfig:
         assert config.cpu_seconds == 0
         assert config.max_procs == 64
 
+    def test_binds_may_be_a_json_string(self):
+        # `hermes config set` with a JSON value, or a hand-edited config.yaml.
+        config = load_bubblewrap_config({"binds": '[{"src": "/data", "readonly": false}]'})
+        assert config.binds == (BindMount(src="/data", dest="/data", readonly=False),)
+
     def test_profile_is_normalized(self):
-        assert load_bubblewrap_config({"TERMINAL_BUBBLEWRAP_PROFILE": " Workspace "}).profile == "workspace"
+        assert load_bubblewrap_config({"profile": " Workspace "}).profile == "workspace"
 
     def test_blank_values_fall_back_to_defaults(self):
-        env = {k: "" for k in (
-            "TERMINAL_BUBBLEWRAP_PROFILE", "TERMINAL_BUBBLEWRAP_BINDS",
-            "TERMINAL_BUBBLEWRAP_MEMORY_MB", "TERMINAL_BUBBLEWRAP_CPU_SECONDS",
-            "TERMINAL_BUBBLEWRAP_MAX_PROCS",
-        )}
-        assert load_bubblewrap_config(env) == BubblewrapConfig()
+        settings = {"profile": "", "binds": "", "memory_mb": "", "cpu_seconds": None, "max_procs": " "}
+        assert load_bubblewrap_config(settings) == BubblewrapConfig()
 
-    @pytest.mark.parametrize("value", ["not json", "{}", '["/data"]', '[{"dest": "/x"}]'])
+    @pytest.mark.parametrize("value", ["not json", "{}", '["/data"]', '[{"dest": "/x"}]', {"src": "/x"}, ["/data"]])
     def test_malformed_binds_raise(self, value):
-        with pytest.raises(ValueError, match="TERMINAL_BUBBLEWRAP_BINDS"):
-            load_bubblewrap_config({"TERMINAL_BUBBLEWRAP_BINDS": value})
+        with pytest.raises(ValueError, match="plugins.entries.bubblewrap.settings.binds"):
+            load_bubblewrap_config({"binds": value})
 
-    @pytest.mark.parametrize("name", [
-        "TERMINAL_BUBBLEWRAP_MEMORY_MB", "TERMINAL_BUBBLEWRAP_CPU_SECONDS", "TERMINAL_BUBBLEWRAP_MAX_PROCS",
-    ])
-    @pytest.mark.parametrize("value", ["abc", "-1", "1.5"])
+    @pytest.mark.parametrize("name", ["memory_mb", "cpu_seconds", "max_procs"])
+    @pytest.mark.parametrize("value", ["abc", "-1", "1.5", -1, True])
     def test_bad_limits_raise(self, name, value):
-        with pytest.raises(ValueError, match=name):
+        with pytest.raises(ValueError, match=f"plugins.entries.bubblewrap.settings.{name}"):
             load_bubblewrap_config({name: value})
 
+    def test_home_mode_comes_from_terminal_home_mode(self):
+        assert load_bubblewrap_config({}).home_mode == "auto"
+        assert load_bubblewrap_config({}, " Profile ").home_mode == "profile"
+
     def test_loaded_config_drives_the_builder(self, paths):
-        config = load_bubblewrap_config({"TERMINAL_BUBBLEWRAP_PROFILE": "restricted"})
+        config = load_bubblewrap_config({"profile": "restricted"})
         argv = build(config, paths=paths)
         assert "--share-net" not in argv
         assert (paths["initial_cwd"], paths["initial_cwd"]) not in triples(argv, "--bind-try")
@@ -316,7 +320,7 @@ class TestRuntimeOverlays:
         assert "--tmpfs" not in argv
 
     def test_existing_docker_sockets_get_the_empty_file_once(self, paths):
-        from tools.environments.bubblewrap import DOCKER_SOCKETS
+        from bubblewrap_plugin.sandbox import DOCKER_SOCKETS
 
         argv = runtime_overlay_args(paths["state_dir"], 2**31 - 1)
         pairs = triples(argv, "--ro-bind")

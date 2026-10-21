@@ -1,6 +1,6 @@
 """Tests for the rlimits BubblewrapEnvironment applies through the prlimit
 prefix in front of bwrap: RLIMIT_AS, RLIMIT_CPU and RLIMIT_NPROC from
-terminal.bubblewrap_memory_mb, _cpu_seconds and _max_procs.
+the memory_mb, cpu_seconds and max_procs settings.
 
 On kernel 6.8.0 with bwrap 0.9.0, RLIMIT_NPROC is counted per uid
 host-wide inside the bwrap user namespace too, and it counts threads. With
@@ -23,14 +23,13 @@ import resource
 import shutil
 import subprocess
 import time
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
-from tools.environments import bubblewrap
+from bubblewrap_plugin import sandbox as bubblewrap
 from tools.environments import local as local_mod
-from tools.environments.bubblewrap import (
+from bubblewrap_plugin.sandbox import (
     WRAPPER_PROCESS_ALLOWANCE,
     BubblewrapConfig,
     BubblewrapEnvironment,

@@ -1,8 +1,9 @@
-"""Bubblewrap (bwrap) terminal backend: the pure argv builder.
+"""Bubblewrap (bwrap) terminal backend: the argv builder and the environment.
 
 Every terminal command under ``terminal.backend: bubblewrap`` runs inside a
-bwrap sandbox. This module builds the bwrap argv prefix from configuration
-and construction-time inputs only. Nothing produced inside a sandbox (the
+bwrap sandbox. This module builds the bwrap argv prefix from the plugin's
+settings (``plugins.entries.bubblewrap.settings.*``) and construction-time
+inputs only. Nothing produced inside a sandbox (the
 tracked cwd, the shell snapshot, command output) feeds a mount or a flag
 argument; the tracked cwd is used for ``--chdir`` alone.
 
@@ -16,7 +17,7 @@ Layout of the argv (later mounts overlay earlier ones):
    restricted; a ``-try`` bind, so a cwd deleted on the host (the agent's
    own ``rm -rf``) skips the bind and the command runs in the recovered
    cwd instead of wedging every later spawn
-4. operator binds from terminal.bubblewrap_binds, minus sensitive sources
+4. operator binds from the ``binds`` setting, minus sensitive sources
 5. the pins: each ancestor of a sensitive path or of HERMES_HOME that lies
    strictly inside a writable bind (the cwd under the workspace and
    network profiles, a read-write operator bind) is bound over itself, so
@@ -68,6 +69,7 @@ needs CAP_SYS_RESOURCE.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -82,7 +84,15 @@ from typing import Iterable, Mapping, Sequence
 
 from hermes_constants import get_hermes_home, get_real_home
 from tools.environments.base import EnvironmentConnectionError, get_sandbox_dir
-from tools.environments.local import LocalEnvironment, _resolve_local_initial_cwd
+from tools.environments.local import (
+    LocalEnvironment,
+    _find_bash,
+    _make_run_env,
+    _pipe_stdin,
+    _prepend_shell_init,
+    _resolve_local_initial_cwd,
+    _resolve_shell_init_files,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -132,13 +142,16 @@ DEFAULT_MEMORY_MB = 256
 DEFAULT_CPU_SECONDS = 30
 DEFAULT_MAX_PROCS = 256
 
-ENV_PROFILE = "TERMINAL_BUBBLEWRAP_PROFILE"
-ENV_BINDS = "TERMINAL_BUBBLEWRAP_BINDS"
-ENV_MEMORY_MB = "TERMINAL_BUBBLEWRAP_MEMORY_MB"
-ENV_CPU_SECONDS = "TERMINAL_BUBBLEWRAP_CPU_SECONDS"
-ENV_MAX_PROCS = "TERMINAL_BUBBLEWRAP_MAX_PROCS"
-# terminal.home_mode, bridged like the keys above. The spellings that
-# hermes_constants.get_subprocess_home treats as "profile".
+# The plugin's settings keys (plugins.entries.bubblewrap.settings.<key>).
+SETTING_PROFILE = "profile"
+SETTING_BINDS = "binds"
+SETTING_MEMORY_MB = "memory_mb"
+SETTING_CPU_SECONDS = "cpu_seconds"
+SETTING_MAX_PROCS = "max_procs"
+SETTINGS_PREFIX = "plugins.entries.bubblewrap.settings"
+# terminal.home_mode is a core setting; core bridges it to this env name and
+# hermes_constants.get_subprocess_home reads it. The spellings that
+# get_subprocess_home treats as "profile".
 ENV_HOME_MODE = "TERMINAL_HOME_MODE"
 PROFILE_HOME_MODES: frozenset[str] = frozenset({"profile", "isolated", "profile_home", "profile-home"})
 
@@ -166,7 +179,7 @@ def resolve_profile(name: str) -> Profile:
         return PROFILES[name]
     except KeyError:
         raise ValueError(
-            f"Unknown terminal.bubblewrap_profile {name!r}. "
+            f"Unknown {SETTINGS_PREFIX}.{SETTING_PROFILE} {name!r}. "
             f"Valid profiles: {', '.join(PROFILE_NAMES)}"
         ) from None
 
@@ -194,57 +207,73 @@ class BubblewrapConfig:
     home_mode: str = DEFAULT_HOME_MODE
 
 
-def _parse_binds(raw: str) -> tuple[BindMount, ...]:
-    try:
-        entries = json.loads(raw)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"{ENV_BINDS} must be a JSON list of {{src, dest, readonly}} objects: {exc}") from None
+def _setting_name(key: str) -> str:
+    return f"{SETTINGS_PREFIX}.{key}"
+
+
+def _parse_binds(raw: object) -> tuple[BindMount, ...]:
+    """The ``binds`` setting: a list of {src, dest, readonly} mappings, or that list as a JSON string."""
+    name = _setting_name(SETTING_BINDS)
+    if raw is None or raw == "" or raw == []:
+        return ()
+    entries = raw
+    if isinstance(raw, str):
+        try:
+            entries = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"{name} must be a list of {{src, dest, readonly}} objects: {exc}") from None
     if not isinstance(entries, list):
-        raise ValueError(f"{ENV_BINDS} must be a JSON list, got {type(entries).__name__}")
+        raise ValueError(f"{name} must be a list, got {type(entries).__name__}")
     binds: list[BindMount] = []
     for entry in entries:
         if not isinstance(entry, dict) or not isinstance(entry.get("src"), str) or not entry["src"]:
-            raise ValueError(f"{ENV_BINDS} entries need a non-empty 'src' string, got {entry!r}")
+            raise ValueError(f"{name} entries need a non-empty 'src' string, got {entry!r}")
         src = entry["src"]
         dest = entry.get("dest") or src
         if not isinstance(dest, str):
-            raise ValueError(f"{ENV_BINDS} 'dest' must be a string, got {dest!r}")
+            raise ValueError(f"{name} 'dest' must be a string, got {dest!r}")
         binds.append(BindMount(src=src, dest=dest, readonly=bool(entry.get("readonly", True))))
     return tuple(binds)
 
 
-def _parse_limit(name: str, raw: str, default: int) -> int:
-    value = raw.strip()
-    if not value:
+def _parse_limit(key: str, raw: object, default: int) -> int:
+    name = _setting_name(key)
+    if raw is None:
         return default
-    try:
-        parsed = int(value)
-    except ValueError:
-        raise ValueError(f"{name} must be a non-negative integer (0 disables the limit), got {raw!r}") from None
+    if isinstance(raw, bool):
+        raise ValueError(f"{name} must be a non-negative integer (0 disables the limit), got {raw!r}")
+    if isinstance(raw, int):
+        parsed = raw
+    else:
+        value = str(raw).strip()
+        if not value:
+            return default
+        try:
+            parsed = int(value)
+        except ValueError:
+            raise ValueError(f"{name} must be a non-negative integer (0 disables the limit), got {raw!r}") from None
     if parsed < 0:
         raise ValueError(f"{name} must be a non-negative integer (0 disables the limit), got {raw!r}")
     return parsed
 
 
-def load_bubblewrap_config(environ: Mapping[str, str] | None = None) -> BubblewrapConfig:
-    """Read the terminal.bubblewrap_* settings from their TERMINAL_BUBBLEWRAP_* env names.
+def load_bubblewrap_config(settings: Mapping[str, object] | None = None, home_mode: str = "") -> BubblewrapConfig:
+    """Build the config from the plugin's settings mapping and terminal.home_mode.
 
-    Blank or missing values take the documented defaults. Malformed values
-    raise ValueError naming the offending variable. The profile name is not
+    Missing or blank values take the documented defaults. Malformed values
+    raise ValueError naming the offending setting. The profile name is not
     validated here; :func:`resolve_profile` rejects unknown names at
     environment construction.
     """
-    env = os.environ if environ is None else environ
-    profile = env.get(ENV_PROFILE, "").strip().lower() or DEFAULT_PROFILE
-    raw_binds = env.get(ENV_BINDS, "").strip()
-    binds = _parse_binds(raw_binds) if raw_binds else ()
+    settings = settings or {}
+    profile = str(settings.get(SETTING_PROFILE) or "").strip().lower() or DEFAULT_PROFILE
     return BubblewrapConfig(
         profile=profile,
-        binds=binds,
-        memory_mb=_parse_limit(ENV_MEMORY_MB, env.get(ENV_MEMORY_MB, ""), DEFAULT_MEMORY_MB),
-        cpu_seconds=_parse_limit(ENV_CPU_SECONDS, env.get(ENV_CPU_SECONDS, ""), DEFAULT_CPU_SECONDS),
-        max_procs=_parse_limit(ENV_MAX_PROCS, env.get(ENV_MAX_PROCS, ""), DEFAULT_MAX_PROCS),
-        home_mode=env.get(ENV_HOME_MODE, "").strip().lower() or DEFAULT_HOME_MODE,
+        binds=_parse_binds(settings.get(SETTING_BINDS)),
+        memory_mb=_parse_limit(SETTING_MEMORY_MB, settings.get(SETTING_MEMORY_MB), DEFAULT_MEMORY_MB),
+        cpu_seconds=_parse_limit(SETTING_CPU_SECONDS, settings.get(SETTING_CPU_SECONDS), DEFAULT_CPU_SECONDS),
+        max_procs=_parse_limit(SETTING_MAX_PROCS, settings.get(SETTING_MAX_PROCS), DEFAULT_MAX_PROCS),
+        home_mode=(home_mode or "").strip().lower() or DEFAULT_HOME_MODE,
     )
 
 
@@ -258,7 +287,7 @@ def sensitive_paths(home: str, hermes_home: str) -> tuple[str, ...]:
     and emits no mount (sensitive_overlay_args skips absent paths).
 
     Each path goes through os.path.realpath, so an entry that is a symlink
-    (a dotfiles repository linking ~/.ssh to ~/dotfiles/ssh) or that sits
+    (a dotfiles repository linking HOME/.ssh to HOME/dotfiles/ssh) or that sits
     under a symlinked component names the directory or file holding the
     secret. That is also the only path bwrap can mount over: it resolves a
     mount destination inside the sandbox root, where an absolute symlink
@@ -442,14 +471,14 @@ def filter_binds(binds: tuple[BindMount, ...], hidden_paths: Sequence[str]) -> l
     for bind in binds:
         if is_sensitive_source(bind.src, hidden_paths):
             logger.warning(
-                "Ignoring terminal.bubblewrap_binds entry %s: source is under a sensitive path",
+                "Ignoring plugins.entries.bubblewrap.settings.binds entry %s: source is under a sensitive path",
                 bind.src,
             )
             continue
         hidden = hidden_path_under(bind.src, hidden_paths)
         if hidden is not None and not _same_host_path(bind.src, bind.dest):
             logger.warning(
-                "Ignoring terminal.bubblewrap_binds entry %s -> %s: the source contains the "
+                "Ignoring plugins.entries.bubblewrap.settings.binds entry %s -> %s: the source contains the "
                 "hidden path %s, which would be readable at the destination. Bind it at its "
                 "own path (dest equal to src) instead.",
                 bind.src, bind.dest, hidden,
@@ -657,6 +686,45 @@ def build_bwrap_args(
 
     argv += ["--chdir", tracked_cwd, "--"]
     return argv
+
+
+def _usable_dir(path: str) -> bool:
+    return os.path.isdir(path) and os.access(path, os.R_OK | os.X_OK)
+
+
+def default_host_cwd() -> str:
+    """Where commands start when Hermes names no working directory.
+
+    The process cwd, as for the local backend, unless it is / or lies under a
+    path this backend hides (a gateway started from its checkout under
+    ~/.hermes, say): no command could run there. Then the real home
+    directory, which is what the gateway picks for the local backend.
+    """
+    home = os.path.realpath(get_real_home() or os.path.expanduser("~"))
+    hidden = sensitive_paths(home, str(get_hermes_home()))
+    try:
+        cwd = os.path.realpath(os.getcwd())
+    except OSError:
+        return home
+    if cwd != os.sep and _usable_dir(cwd) and not any(_is_within(cwd, root) for root in hidden):
+        return cwd
+    return home
+
+
+def host_cwd_for(cwd: str) -> str:
+    """The host directory to start in for the *cwd* Hermes passed.
+
+    A host directory is kept as given (the environment refuses / and paths
+    under the hidden set itself, with a message naming terminal.cwd).
+    Anything else is not a place on this host a command can start in: an
+    empty value, ``~`` handed over unexpanded, or the ``/root`` container
+    default Hermes before 0.22.3 gives every plugin backend. Those get
+    :func:`default_host_cwd`.
+    """
+    expanded = os.path.expanduser(cwd) if cwd else ""
+    if expanded and os.path.isabs(expanded) and _usable_dir(expanded):
+        return expanded
+    return default_host_cwd()
 
 
 PROBE_ARGS: tuple[str, ...] = ("--unshare-user", "--ro-bind", "/", "/", "true")
@@ -873,8 +941,15 @@ class BubblewrapEnvironment(LocalEnvironment):
         env: dict | None = None,
         *,
         config: BubblewrapConfig | None = None,
+        replaced_cwd: str | None = None,
     ):
-        self._config = load_bubblewrap_config() if config is None else config
+        # Without a config (direct construction), the defaults plus terminal.home_mode as core
+        # exports it: that is what decides the subprocess HOME the overlays must leave reachable.
+        self._config = load_bubblewrap_config({}, os.environ.get(ENV_HOME_MODE, "")) if config is None else config
+        # The cwd Hermes asked for when it was not a host directory (Hermes
+        # before 0.22.3 hands plugin backends /root); execute() maps it to the
+        # tracked cwd, since commands keep arriving with it.
+        self._replaced_cwd = replaced_cwd
         # Reject an unknown profile and an unusable bwrap before anything is
         # created on disk; the probe raises EnvironmentConnectionError, which
         # the terminal tool turns into its degraded or error result.
@@ -1057,7 +1132,7 @@ class BubblewrapEnvironment(LocalEnvironment):
                     "writable inside the sandbox"
                 )
             raise ValueError(
-                f"terminal.bubblewrap_binds entry {bind.src} -> {bind.dest} is read-write "
+                f"plugins.entries.bubblewrap.settings.binds entry {bind.src} -> {bind.dest} is read-write "
                 f"and {problem} with the bubblewrap backend: a command could swap the "
                 "source and choose the next spawn's mount. Bind it read-write only at "
                 "its own path (dest equal to src) directly under terminal.cwd, a "
@@ -1109,7 +1184,7 @@ class BubblewrapEnvironment(LocalEnvironment):
                     "writable inside the sandbox with the bubblewrap backend: a command "
                     "could replace the empty file bound over hidden files. Set "
                     "terminal.sandbox_dir to a directory outside terminal.cwd and "
-                    "outside every read-write terminal.bubblewrap_binds source; the "
+                    "outside every read-write plugins.entries.bubblewrap.settings.binds source; the "
                     "default HERMES_HOME/sandboxes is covered by the HERMES_HOME overlay."
                 )
 
@@ -1132,6 +1207,8 @@ class BubblewrapEnvironment(LocalEnvironment):
         command: its shape can be forged by a command that prints the
         bwrap line and replaces its shell.
         """
+        if cwd and cwd == self._replaced_cwd:
+            cwd = ""
         note = self._reset_masked_cwd()
         result = super().execute(command, cwd, **kwargs)
         if note is not None:
@@ -1194,6 +1271,53 @@ class BubblewrapEnvironment(LocalEnvironment):
 
     def _wrap_popen_args(self, args: list[str]) -> list[str]:
         return self._prlimit_prefix() + self._bwrap_prefix(self.cwd) + list(args)
+
+    def _run_bash(self, cmd_string: str, *, login: bool = False, timeout: int = 120,
+                  stdin_data: str | None = None) -> subprocess.Popen:
+        """LocalEnvironment._run_bash with the shell argv wrapped in prlimit + bwrap.
+
+        Every spawn goes through here, the login bootstrap that builds the
+        shell snapshot included, so the user's rc files are sourced inside
+        the sandbox too. The wrap happens after the cwd recovery so --chdir
+        carries the recovered directory, not a deleted one. Nothing runs in
+        the child between fork and exec: the limits ride the argv (prlimit).
+        """
+        bash = _find_bash()
+        if login:
+            cmd_string = _prepend_shell_init(cmd_string, _resolve_shell_init_files())
+        args = [bash, *(["-l"] if login else []), "-c", cmd_string]
+        self._recover_cwd()
+        args = self._wrap_popen_args(args)
+        proc = subprocess.Popen(
+            args, text=True, env=_make_run_env(self.env), encoding="utf-8", errors="replace",
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            stdin=subprocess.PIPE if stdin_data is not None else subprocess.DEVNULL,
+            start_new_session=True, cwd=self.cwd,
+        )
+        with contextlib.suppress(ProcessLookupError):
+            proc._hermes_pgid = os.getpgid(proc.pid)
+            from gateway.status import get_process_start_time
+
+            proc._hermes_pgid_start = get_process_start_time(proc.pid)
+        if stdin_data is not None:
+            _pipe_stdin(proc, stdin_data)
+        return proc
+
+    def _extract_cwd_from_output(self, result: dict):
+        """Keep the tracked cwd off / and out of this environment's state dir.
+
+        execute_code runs its helper commands with cwd="/" and its script from
+        a directory under the state dir, and every command reports where it
+        ended up. Followed, the tracked cwd would land on / (read-only, and
+        refused as a working directory by this backend) or in a directory that
+        is deleted when the call ends, and relative paths in the file tools
+        and the next --chdir would follow it there. The result still reports
+        where the command ran.
+        """
+        prev_cwd = self.cwd
+        super()._extract_cwd_from_output(result)
+        if self.cwd != prev_cwd and (self.cwd == os.sep or _is_within(os.path.realpath(self.cwd), self._state_dir)):
+            self.cwd = prev_cwd
 
     def _wrap_command(self, command: str, cwd: str) -> str:
         # --unsetenv strips the socket variables from the environment bwrap

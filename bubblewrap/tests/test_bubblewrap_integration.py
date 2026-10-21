@@ -17,10 +17,11 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from tools.environments import bubblewrap
-from tools.environments.bubblewrap import BubblewrapEnvironment
+from bubblewrap_plugin import sandbox as bubblewrap
+from bubblewrap_plugin.sandbox import BubblewrapEnvironment
 from tools.environments.local import LocalEnvironment
 from tools.terminal_tool_backends import _create_environment
+from tools.terminal_tool_lifecycle import get_active_env
 
 
 def _bwrap_usable() -> bool:
@@ -48,9 +49,9 @@ def work_dir(tmp_path):
 
 
 @pytest.fixture
-def isolated_tool(tmp_path, work_dir, monkeypatch):
-    """terminal_tool with backend=bubblewrap, cwd=work_dir, an isolated
-    HERMES_HOME and a clean environment cache."""
+def isolated_tool(tmp_path, work_dir, monkeypatch, bwrap_provider):
+    """terminal_tool with backend=bubblewrap (the plugin's provider registered),
+    cwd=work_dir, an isolated HERMES_HOME and a clean environment cache."""
     import tools.terminal_tool as tt
 
     monkeypatch.setenv("HERMES_HOME", str(tmp_path / ".hermes"))
@@ -80,9 +81,10 @@ def _no_spawn(monkeypatch):
 
 
 class TestFactory:
-    def test_factory_returns_bubblewrap_environment_with_cwd_timeout_and_config(self, isolated_tool, work_dir, monkeypatch):
-        monkeypatch.setenv("TERMINAL_BUBBLEWRAP_PROFILE", "restricted")
-        monkeypatch.setenv("TERMINAL_BUBBLEWRAP_MEMORY_MB", "512")
+    def test_factory_returns_bubblewrap_environment_with_cwd_timeout_and_config(self, isolated_tool, work_dir,
+                                                                                 monkeypatch, bwrap_provider):
+        _provider, settings = bwrap_provider
+        settings.update(profile="restricted", memory_mb=512)
         with _no_spawn(monkeypatch):
             env = _create_environment("bubblewrap", "", str(work_dir), 42)
         try:
@@ -99,11 +101,44 @@ class TestFactory:
             _create_environment("no-such-backend", "", str(work_dir), 10)
         assert "Unknown environment type: no-such-backend" in str(excinfo.value)
 
-    def test_default_cwd_is_the_host_cwd(self, isolated_tool, monkeypatch):
+    @needs_bwrap
+    def test_without_terminal_cwd_commands_start_in_the_host_cwd(self, isolated_tool, work_dir, monkeypatch):
+        # Hermes 0.22.3+ asks the provider (default_cwd); older cores hand it /root, which the
+        # environment maps to the same host default. Either way the command runs where Hermes started.
         monkeypatch.delenv("TERMINAL_CWD", raising=False)
-        config = isolated_tool._get_env_config()
-        assert config["env_type"] == "bubblewrap"
-        assert config["cwd"] == isolated_tool._safe_getcwd()
+        monkeypatch.chdir(work_dir)
+        r = json.loads(isolated_tool.terminal_tool("pwd", task_id="default-cwd"))
+        assert r["exit_code"] == 0, r
+        assert r["output"].strip() == os.path.realpath(work_dir)
+        r = json.loads(isolated_tool.terminal_tool("touch here && pwd", task_id="default-cwd"))
+        assert r["exit_code"] == 0, r
+        assert (work_dir / "here").is_file()
+
+    @needs_bwrap
+    def test_started_under_a_hidden_path_commands_start_in_home(self, isolated_tool, tmp_path, monkeypatch):
+        # A gateway started from its checkout under HOME/.hermes: no command could run there.
+        home = tmp_path / "home"
+        checkout = home / ".hermes" / "hermes-agent"
+        checkout.mkdir(parents=True)
+        monkeypatch.setenv("HERMES_REAL_HOME", str(home))
+        monkeypatch.setenv("HOME", str(home))
+        monkeypatch.delenv("TERMINAL_CWD", raising=False)
+        monkeypatch.chdir(checkout)
+        r = json.loads(isolated_tool.terminal_tool("pwd", task_id="hidden-start"))
+        assert r["exit_code"] == 0, r
+        assert r["output"].strip() == os.path.realpath(home)
+
+    def test_a_cwd_that_is_not_a_host_directory_starts_in_the_default(self, isolated_tool, work_dir, monkeypatch):
+        # Hermes before 0.22.3 hands plugin backends the container default /root, and keeps passing
+        # it with every command; the environment starts in the host default and maps it there.
+        monkeypatch.chdir(work_dir)
+        with _no_spawn(monkeypatch):
+            env = _create_environment("bubblewrap", "", "/nonexistent-root", 10)
+        try:
+            assert env.cwd == os.path.realpath(work_dir)
+            assert env._replaced_cwd == "/nonexistent-root"
+        finally:
+            env.cleanup()
 
     def test_check_terminal_requirements_follows_the_probe(self, isolated_tool, monkeypatch):
         monkeypatch.setattr(bubblewrap, "run_probe", lambda: ("/usr/bin/bwrap", None))
@@ -124,7 +159,7 @@ class TestToolIntegration:
         assert r["exit_code"] == 0, r
         # A pid namespace with a handful of processes: the command ran sandboxed.
         assert int(r["output"].strip().splitlines()[-1]) < 10
-        assert isinstance(isolated_tool.get_active_env(task_id), BubblewrapEnvironment)
+        assert isinstance(get_active_env(task_id), BubblewrapEnvironment)
 
         host_file = work_dir / "probe.txt"
         assert host_file.read_text() == "hello"
@@ -146,19 +181,32 @@ class TestToolIntegration:
         assert "TRUST-ANCHORS" in r["output"]
         assert "config.yaml" not in r["output"]
 
-    def test_background_is_refused_and_never_spawned_unsandboxed(self, isolated_tool, monkeypatch):
+    def test_background_never_runs_on_the_host_and_ends_with_its_sandbox(self, isolated_tool, work_dir, monkeypatch):
+        """Hermes core has no "no background processes" flag for plugin backends, so a background job is
+        launched through env.execute like on any non-local backend. It must run inside the sandbox
+        (never spawn_local on the host) and go down with it: bwrap tears the pid namespace down
+        when the launching shell exits, so the job never writes its marker. The system prompt
+        note tells the model background processes are unavailable here."""
+        import time
+
         from tools.process_registry import process_registry
 
         def forbidden(*args, **kwargs):
             raise AssertionError("spawn_local must not run under bubblewrap")
 
         monkeypatch.setattr(process_registry, "spawn_local", forbidden)
-        r = json.loads(isolated_tool.terminal_tool("sleep 30", background=True, task_id="background"))
-        assert r["status"] == "error"
-        assert r["exit_code"] == -1
-        assert "background" in r["error"]
-        assert "session_id" not in r
-
+        r = json.loads(isolated_tool.terminal_tool("sleep 2; touch bg-marker", background=True, task_id="background"))
+        session_id = r.get("session_id")
+        deadline = time.monotonic() + 15
+        status = {}
+        while time.monotonic() < deadline:
+            status = process_registry.poll(session_id) if session_id else {"status": "exited"}
+            if status.get("status") != "running":
+                break
+            time.sleep(0.5)
+        assert status.get("status") != "running", status
+        time.sleep(3)
+        assert not (work_dir / "bg-marker").exists()
 
 class TestExecuteCodeDispatch:
     def test_execute_code_dispatches_bubblewrap_to_the_env_backed_path(self, isolated_tool):
@@ -208,7 +256,7 @@ class TestExecuteCodeIntegration:
         assert pids < 10, r["output"]
         # RLIMIT_AS from the default memory_mb applies to the script too.
         assert "ALLOC MemoryError" in lines, r["output"]
-        env = isolated_tool.get_active_env(task_id)
+        env = get_active_env(task_id)
         assert isinstance(env, BubblewrapEnvironment)
         # The RPC commands ran with cwd=/; the terminal's tracked cwd is untouched
         # and the next terminal write lands in the project directory.
