@@ -5,12 +5,12 @@ that the backend reports itself unavailable instead of failing on missing bwrap 
 
 from __future__ import annotations
 
+import json
 import shutil
 import sys
 from pathlib import Path
 
 import pytest
-import yaml
 
 import bubblewrap_plugin as plugin
 
@@ -32,7 +32,8 @@ def _install(home: Path, settings: dict | None = None) -> None:
     config = {"plugins": {"enabled": ["bubblewrap"]}}
     if settings:
         config["plugins"]["entries"] = {"bubblewrap": {"settings": settings}}
-    (home / "config.yaml").write_text(yaml.safe_dump(config))
+    # JSON is YAML; core's test env does not ship PyYAML.
+    (home / "config.yaml").write_text(json.dumps(config))
 
 
 @pytest.fixture
