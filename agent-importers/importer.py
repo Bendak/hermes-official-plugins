@@ -1,4 +1,4 @@
-"""Import another coding agent's setup (Claude Code, Codex CLI) into a Hermes home.
+"""Import another coding agent's setup (Claude Code, Codex CLI, Cursor) into a Hermes home.
 
 Secrets are NEVER imported: credential files are never read, and MCP env vars with secret-looking
 names (KEY, TOKEN, SECRET, PASSWORD, ...) are stripped and reported so the user re-adds them via
@@ -21,9 +21,12 @@ from typing import Any, Mapping, Optional, Sequence
 ENTRY_DELIMITER = "\n§\n"
 # Character budget for merged memory files.
 MEMORY_CHAR_LIMIT = 20_000
-SUPPORTED_AGENTS = ("claude-code", "codex")
-AGENT_DEFAULT_DIRS = {"claude-code": ".claude", "codex": ".codex"}
-_SKILL_CATEGORY = {"claude-code": "claude-code-imports", "codex": "codex-imports"}
+SUPPORTED_AGENTS = ("claude-code", "codex", "cursor")
+AGENT_DEFAULT_DIRS = {"claude-code": ".claude", "codex": ".codex", "cursor": ".cursor"}
+_SKILL_CATEGORY = {"claude-code": "claude-code-imports", "codex": "codex-imports",
+                   "cursor": "cursor-imports"}
+# Leading YAML frontmatter block (Cursor .mdc rules carry one).
+_FRONTMATTER_RE = re.compile(r"\A---[ \t]*\r?\n.*?\r?\n---[ \t]*(?:\r?\n|\Z)", re.DOTALL)
 
 # Env var names that look like credentials — never copied into config.yaml.
 _SECRET_KEY_RE = re.compile(
@@ -34,6 +37,12 @@ _SECRET_KEY_RE = re.compile(
 def is_secret_key(key: str) -> bool:
     """Return True when an env-var name looks like a credential."""
     return bool(_SECRET_KEY_RE.search(key or ""))
+
+
+def strip_frontmatter(text: str) -> str:
+    """Drop a leading ``---`` YAML frontmatter block. In Cursor rules it holds routing metadata
+    (``description``, ``globs``, ``alwaysApply``), not instructions."""
+    return _FRONTMATTER_RE.sub("", text or "", count=1)
 
 
 def normalize_text(text: str) -> str:
@@ -223,6 +232,22 @@ def _translate_mcp_server(name: str, srv: dict[str, Any]) -> tuple[dict[str, Any
     return hermes_srv, stripped
 
 
+def cursor_rule_files(rules_dir: Path) -> list[Path]:
+    """Cursor User Rules: ``rules/**/*.md`` and ``*.mdc``."""
+    return sorted(p for p in rules_dir.rglob("*") if p.is_file() and p.suffix in (".md", ".mdc"))
+
+
+def nested_skill_dirs(source_root: Path) -> list[Path]:
+    """Folders holding a ``SKILL.md`` at any depth below ``source_root``, outermost first; a
+    ``SKILL.md`` inside another skill's folder belongs to that skill, not a new one."""
+    found: list[Path] = []
+    for path in sorted(source_root.rglob("SKILL.md"), key=lambda p: (len(p.parts), p)):
+        folder = path.parent
+        if folder != source_root and not any(folder.is_relative_to(f) for f in found):
+            found.append(folder)
+    return sorted(found)
+
+
 class AgentImporter:
     """Detect/parse/map/apply importer for one agent source tree. ``execute=False`` runs the full
     plan without touching disk; every item is recorded as imported/skipped/conflict/error."""
@@ -287,7 +312,8 @@ class AgentImporter:
             self.record("source", self.source_root, None, "error",
                         "Source directory does not exist")
         else:
-            {"claude-code": self._run_claude_code, "codex": self._run_codex}[self.agent]()
+            {"claude-code": self._run_claude_code, "codex": self._run_codex,
+             "cursor": self._run_cursor}[self.agent]()
         return self.build_report()
 
     def _run_claude_code(self) -> None:
@@ -326,6 +352,17 @@ class AgentImporter:
             "No memories directory found")
         self.import_skills(self.source_root / "skills")
 
+    def _run_cursor(self) -> None:
+        self.import_context_file(self.source_root / "AGENTS.md", "agents-md")
+        rules_dir = self.source_root / "rules"
+        self._import_markdown_files(
+            "rules", rules_dir, cursor_rule_files(rules_dir) if rules_dir.is_dir() else None,
+            "No rules directory found", strip_meta=True)
+        mcp = self._load_source_mapping(
+            "mcp-servers", self.source_root / "mcp.json", json.loads, self._JSON_ERRORS).get("mcpServers")
+        self.import_mcp_servers(mcp if isinstance(mcp, dict) else {}, kind="mcp-servers")
+        self.import_skills(self.source_root / "skills", recursive=True)
+
     _JSON_ERRORS = (json.JSONDecodeError, OSError)
 
     def _load_source_mapping(self, kind: str, path: Path, parse, errors, *,
@@ -353,10 +390,12 @@ class AgentImporter:
                                     f"No {source.name} found", single_file=True)
 
     def _import_markdown_files(self, kind: str, source: Path, files: Optional[list[Path]],
-                               missing_reason: str, single_file: bool = False) -> None:
+                               missing_reason: str, single_file: bool = False,
+                               strip_meta: bool = False) -> None:
         """Extract entries from ``files`` (None = source missing) and merge into memories/MEMORY.md.
         An unreadable file records an error; a directory import then still reports "no entries"
-        when nothing was extracted, while a single-file import stops at the error."""
+        when nothing was extracted, while a single-file import stops at the error. ``strip_meta``
+        drops a leading frontmatter block first (Cursor rules)."""
         destination = self.target_root / "memories" / "MEMORY.md"
         if files is None:
             self.record(kind, None, destination, "skipped", missing_reason)
@@ -365,7 +404,8 @@ class AgentImporter:
         failed = False
         for md_file in files:
             try:
-                incoming.extend(extract_markdown_entries(read_text(md_file)))
+                text = read_text(md_file)
+                incoming.extend(extract_markdown_entries(strip_frontmatter(text) if strip_meta else text))
             except OSError as exc:
                 failed = True
                 self.record(kind, md_file, destination, "error", f"Could not read file: {exc}")
@@ -480,21 +520,31 @@ class AgentImporter:
             config["mcp_servers"] = existing
             write_config_file(destination, config)
 
-    def import_skills(self, source_root: Path) -> None:
-        """skills/<name>/SKILL.md dirs → HERMES_HOME/skills/<category>/<name>."""
+    def import_skills(self, source_root: Path, recursive: bool = False) -> None:
+        """skills/<name>/SKILL.md dirs → HERMES_HOME/skills/<category>/<name>.
+
+        ``recursive`` (Cursor) also finds skills in category folders (``skills/shipping/land-it``):
+        a skill is the folder holding ``SKILL.md``, so it imports flat as ``<category>/land-it``
+        and a second skill of the same name in another folder is a conflict."""
         destination_root = self.target_root / "skills" / _SKILL_CATEGORY[self.agent]
         if not source_root.is_dir():
             self.record("skills", None, destination_root, "skipped", "No skills directory found")
             return
-        skill_dirs = [p for p in sorted(source_root.iterdir())
-                      if p.is_dir() and (p / "SKILL.md").exists()]
+        skill_dirs = (nested_skill_dirs(source_root) if recursive else
+                      [p for p in sorted(source_root.iterdir()) if p.is_dir() and (p / "SKILL.md").exists()])
         if not skill_dirs:
             self.record("skills", source_root, destination_root, "skipped",
                         "No skills with SKILL.md found")
             return
         from .sync import skill_tree_digest
+        planned: set[str] = set()
         for skill_dir in skill_dirs:
             destination = destination_root / skill_dir.name
+            if skill_dir.name in planned:
+                self.record("skill", skill_dir, destination, "conflict",
+                            "Duplicate skill name in source tree — already imported from another folder")
+                continue
+            planned.add(skill_dir.name)
             if destination.exists() and not self.overwrite:
                 if skill_dir.name not in self.sync_skills:
                     self.record("skill", skill_dir, destination, "conflict", "Destination skill already exists")

@@ -2,7 +2,7 @@
 
 Part of [Hermes Official Plugins](https://github.com/NousResearch/hermes-official-plugins). Formerly built into Hermes Agent core (`hermes_cli/agent_import.py`).
 
-`hermes import-agent` brings an existing **Claude Code** (`~/.claude`) or **OpenAI Codex CLI** (`~/.codex`) setup into Hermes with one command. Every run shows a per-item preview first, `--dry-run` never touches disk, and API keys and credentials are never imported.
+`hermes import-agent` brings an existing **Claude Code** (`~/.claude`), **OpenAI Codex CLI** (`~/.codex`) or **Cursor** (`~/.cursor`) setup into Hermes with one command. Every run shows a per-item preview first, `--dry-run` never touches disk, and API keys and credentials are never imported.
 
 ## Install
 
@@ -20,9 +20,10 @@ source get the plugin automatically on update; everyone else sees the install li
 ## Usage
 
 ```bash
-hermes import-agent                    # auto-detect ~/.claude or ~/.codex
+hermes import-agent                    # auto-detect ~/.claude, ~/.codex or ~/.cursor
 hermes import-agent claude-code        # import from ~/.claude
 hermes import-agent codex              # import from ~/.codex
+hermes import-agent cursor             # import from ~/.cursor
 hermes import-agent claude-code --dry-run          # preview only
 hermes import-agent codex --source /path/to/.codex # custom location
 hermes import-agent claude-code --overwrite --yes  # replace conflicts, skip prompts
@@ -56,9 +57,20 @@ Claude's `Bash(npm run test:*)` prefix rules become `npm run test*` globs. Non-`
 | `memories/*.md` | Memory entries in `memories/MEMORY.md` |
 | `skills/<name>/` (dirs with `SKILL.md`) | `skills/codex-imports/<name>/` |
 
+### Cursor (`~/.cursor`)
+
+| Cursor | Hermes |
+|---|---|
+| `AGENTS.md` | Memory entries in `memories/MEMORY.md` |
+| `rules/**/*.md`, `rules/**/*.mdc` (User Rules) | Memory entries in `memories/MEMORY.md` |
+| `mcp.json` `mcpServers` | `mcp_servers` in `config.yaml` |
+| `skills/**/<name>/` (dirs with `SKILL.md`, category folders allowed) | `skills/cursor-imports/<name>/` |
+
+`.mdc` frontmatter (`description`, `globs`, `alwaysApply`) is Cursor routing metadata and is stripped; only the rule body is imported. A skill is the folder holding `SKILL.md`, so `skills/shipping/land-it/` imports as `cursor-imports/land-it/`; two skills with the same name in different folders are reported as a conflict.
+
 ## What is never imported
 
-Credential files (`~/.claude/.credentials.json`, `~/.codex/auth.json`) are never read, and MCP server environment variables or headers with secret-looking names (`*_TOKEN`, `*_API_KEY`, `Authorization`, ...) are stripped and listed in the report so you can re-add them deliberately. Run `hermes setup` for providers, or put secrets in the profile's `.env`.
+Credential files (`~/.claude/.credentials.json`, `~/.codex/auth.json`, `~/.cursor/cli-config.json`) are never read, and MCP server environment variables or headers with secret-looking names (`*_TOKEN`, `*_API_KEY`, `Authorization`, ...) are stripped and listed in the report so you can re-add them deliberately. Run `hermes setup` for providers, or put secrets in the profile's `.env`.
 
 ## Behaviour
 

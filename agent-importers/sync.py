@@ -17,7 +17,7 @@ import time
 from pathlib import Path
 from typing import Any, Iterator, Optional
 
-from .importer import atomic_write_text
+from .importer import atomic_write_text, cursor_rule_files
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,10 @@ def _iter_sync_files(agent: str, source_root: Path) -> Iterator[Path]:
         # ~/.claude.json lives NEXT TO ~/.claude/ (see AgentImporter._run_claude_code)
         paths = [source_root / "CLAUDE.md", source_root / "settings.json",
                  source_root.parent / ".claude.json"]
+    elif agent == "cursor":
+        paths = [source_root / "AGENTS.md", source_root / "mcp.json"]
+        rules_dir = source_root / "rules"
+        paths.extend(cursor_rule_files(rules_dir) if rules_dir.is_dir() else [])
     else:
         paths = [source_root / "AGENTS.md", source_root / "config.toml"]
         paths.extend(sorted((source_root / "memories").glob("*.md")))

@@ -11,10 +11,10 @@ from .importer import AGENT_DEFAULT_DIRS, SUPPORTED_AGENTS, AgentImporter, detec
 
 logger = logging.getLogger(__name__)
 
-HELP = "Import a Claude Code or Codex CLI setup into Hermes"
+HELP = "Import a Claude Code, Codex CLI or Cursor setup into Hermes"
 DESCRIPTION = (
     "One-command import of another coding agent's setup into Hermes. Maps CLAUDE.md/AGENTS.md "
-    "instructions, permission allowlists, MCP servers, skills, and memories into their Hermes "
+    "instructions, Cursor rules, permission allowlists, MCP servers, skills, and memories into their Hermes "
     "equivalents. Always shows a preview before making changes. API keys and credentials are "
     "never imported — run 'hermes setup' for those.")
 
