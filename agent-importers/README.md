@@ -1,6 +1,8 @@
-# Agent Importers
+<p align="center"><img src="../assets/agent-importers.jpg" alt="Agent Importers: official Hermes Agent plugin" width="100%"></p>
 
-Part of [Hermes Official Plugins](https://github.com/NousResearch/hermes-official-plugins). Formerly built into Hermes Agent core (`hermes_cli/agent_import.py`).
+# Agent Importers for Hermes Agent
+
+> Part of the [Hermes Official Plugins](../README.md), Nous Research's official plugins for Hermes Agent. Formerly built into Hermes Agent core (`hermes_cli/agent_import.py`).
 
 `hermes import-agent` brings an existing **Claude Code** (`~/.claude`), **OpenAI Codex CLI** (`~/.codex`) or **Cursor** (`~/.cursor`) setup into Hermes with one command. Every run shows a per-item preview first, `--dry-run` never touches disk, and API keys and credentials are never imported.
 

@@ -10,7 +10,7 @@ Wiring goes only through the public plugin API (``ctx.register_cli_command``).
 
 from __future__ import annotations
 
-import importlib.machinery
+from pathlib import Path
 
 from .cli import DESCRIPTION, HELP, handle_cli, setup_cli
 
@@ -18,11 +18,10 @@ from .cli import DESCRIPTION, HELP, handle_cli, setup_cli
 def _core_ships_import_agent() -> bool:
     """A core from before the move still registers its own ``hermes import-agent``; adding a second
     subparser of that name would abort the CLI's plugin-command wiring, so this copy stays inert
-    there. ``PathFinder`` (not ``importlib.util.find_spec``) so an editable install of another
-    checkout cannot answer for the running core."""
-    import hermes_cli
-    return importlib.machinery.PathFinder.find_spec(
-        "hermes_cli.agent_import", list(hermes_cli.__path__)) is not None
+    there. Looked up next to the running core's own modules, so an editable install of another
+    checkout cannot answer for it."""
+    from hermes_cli import config
+    return (Path(config.__file__).parent / "agent_import.py").is_file()
 
 
 def register(ctx) -> None:
