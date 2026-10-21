@@ -109,7 +109,8 @@ def _scratch_paths() -> list[str]:
 # --- Scratch disk usage: advisory warning before a new instance, cached so the recursive scan does
 # not run on every environment creation (a result up to 5 minutes stale is harmless).
 _DISK_USAGE_CACHE_TTL = 300.0
-_disk_usage_cache: dict = {"timestamp": 0.0, "result": False}
+# -inf, not 0.0: monotonic() counts from boot, so a 0.0 stamp reads as fresh for the first 5 minutes of uptime.
+_disk_usage_cache: dict = {"timestamp": float("-inf"), "result": False}
 
 
 def _disk_warning_threshold_gb() -> float:

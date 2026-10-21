@@ -20,8 +20,9 @@ class _Ctx:
 def registered():
     previous = reg.snapshot_registration("singularity")
     singularity_plugin.register(_Ctx())
-    yield reg.get_provider("singularity")
-    reg.restore_registration("singularity", previous)
+    current = reg.get_provider("singularity")
+    yield current
+    reg.restore_registration("singularity", current, previous)
 
 
 def test_backend_resolves_and_core_reads_its_flags(registered):

@@ -133,9 +133,9 @@ def test_disk_warning_counts_scratch_dirs(monkeypatch, tmp_path):
     overlay = tmp_path / "scratch" / "hermes-overlays"
     overlay.mkdir(parents=True)
     (overlay / "blob").write_bytes(b"x" * 2048)
-    monkeypatch.setitem(singularity_env._disk_usage_cache, "timestamp", 0.0)
+    monkeypatch.setitem(singularity_env._disk_usage_cache, "timestamp", float("-inf"))
     monkeypatch.setenv("TERMINAL_DISK_WARNING_GB", "0.000001")
     assert singularity_env.check_disk_usage_warning() is True
-    monkeypatch.setitem(singularity_env._disk_usage_cache, "timestamp", 0.0)
+    monkeypatch.setitem(singularity_env._disk_usage_cache, "timestamp", float("-inf"))
     monkeypatch.setenv("TERMINAL_DISK_WARNING_GB", "500")
     assert singularity_env.check_disk_usage_warning() is False
