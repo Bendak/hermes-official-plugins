@@ -1323,7 +1323,9 @@ class TestEventBridgePollE2E:
             monkeypatch.setattr(mcp_serve, "_get_session_db", lambda: db)
             bridge = mcp_serve.EventBridge()
             bridge._establish_baseline()
-            pinned = {name: (tmp_path / name).stat().st_mtime_ns for name in ("state.db", "state.db-wal")}
+            # The baseline's close can checkpoint the WAL away (SQLite-version dependent); pin what exists.
+            pinned = {name: (tmp_path / name).stat().st_mtime_ns
+                      for name in ("state.db", "state.db-wal") if (tmp_path / name).exists()}
 
             db.append_message("s1", role="assistant", content="same tick")
             for name, mtime_ns in pinned.items():
