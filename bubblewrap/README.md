@@ -133,7 +133,10 @@ profile.
 
 The working directory (`terminal.cwd`, else the directory Hermes was started in, as for the `local`
 backend) is the writable set: everything under it can be changed, everything else is read-only. Point
-it at a project or scratch directory. With your home directory as the working directory every dotfile
+it at a project or scratch directory. Only that setting decides what is writable: a `cd` (the model's,
+or a Desktop/TUI workspace outside it) moves where commands start, and they run read-only there, also
+after Hermes recreates the environment. A `terminal.cwd` that does not exist runs commands read-only in
+its nearest existing parent. With your home directory as the working directory every dotfile
 outside the hidden set (`.bashrc`, `.profile`, `.config/autostart`, `.local/bin`, ...) is writable,
 which is a path back into your own shells; Hermes logs a warning in that case. A working directory of
 `/` is refused, and so is one under the Hermes home or a hidden path, since no command could run there.

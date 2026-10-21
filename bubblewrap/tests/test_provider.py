@@ -113,3 +113,23 @@ class TestDiscovery:
         _manager, provider = discovered({"memory_mb": "lots"})
         with pytest.raises(ValueError, match="plugins.entries.bubblewrap.settings.memory_mb"):
             provider.load_config()
+
+    def test_each_profile_reads_its_own_settings(self, discovered, tmp_path, monkeypatch):
+        # One registration serves every profile of a multiplexed gateway: settings are read per call.
+        _manager, provider = discovered({"profile": "restricted", "memory_mb": 512})
+        assert (provider.load_config().profile, provider.load_config().memory_mb) == ("restricted", 512)
+        other = tmp_path / "other-profile"
+        other.mkdir()
+        (other / "config.yaml").write_text(json.dumps({"plugins": {"enabled": ["bubblewrap"], "entries": {
+            "bubblewrap": {"settings": {"profile": "workspace", "memory_mb": 2048}}}}}))
+        monkeypatch.setenv("HERMES_HOME", str(other))
+        assert (provider.load_config().profile, provider.load_config().memory_mb) == ("workspace", 2048)
+
+    def test_prompt_note_names_extra_writable_paths(self, discovered, monkeypatch):
+        manager, _provider = discovered({"profile": "restricted",
+                                         "binds": [{"src": "/srv/out", "readonly": False}, {"src": "/srv/ref"}]})
+        monkeypatch.setenv("TERMINAL_ENV", "bubblewrap")
+        monkeypatch.setenv("TERMINAL_HOME_MODE", "profile")
+        note = {s.id: s.content for s in manager.render_system_prompt_sections({})}["bubblewrap-sandbox"]
+        assert "read-only except /srv/out, the profile home ($HOME) (the working directory is read-only" in note
+        assert "/srv/ref" not in note

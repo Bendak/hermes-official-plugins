@@ -711,20 +711,43 @@ def default_host_cwd() -> str:
     return home
 
 
-def host_cwd_for(cwd: str) -> str:
-    """The host directory to start in for the *cwd* Hermes passed.
+# terminal.cwd values that mean "the directory Hermes runs in" (core's placeholders).
+CWD_PLACEHOLDERS: frozenset[str] = frozenset({"", ".", "auto", "cwd"})
 
-    A host directory is kept as given (the environment refuses / and paths
-    under the hidden set itself, with a message naming terminal.cwd).
-    Anything else is not a place on this host a command can start in: an
-    empty value, ``~`` handed over unexpanded, or the ``/root`` container
-    default Hermes before 0.22.3 gives every plugin backend. Those get
-    :func:`default_host_cwd`.
+
+def writable_root_for(configured_cwd: str) -> str:
+    """The writable root from configuration: ``terminal.cwd``, else :func:`default_host_cwd`.
+
+    Only configuration decides what is writable, never where a session has
+    ``cd``'d to: Hermes recreates environments (after the idle timeout, for
+    the file tools, for a delegated child) from the session's recorded cwd,
+    and taking that as the root would let a model's ``cd ~`` make the whole
+    home directory writable on the next recreation. A configured path is kept
+    as given even when it is missing: the environment then runs in its nearest
+    existing parent, read-only, rather than somewhere writable.
+    """
+    value = (configured_cwd or "").strip()
+    if value in CWD_PLACEHOLDERS:
+        return default_host_cwd()
+    return os.path.abspath(os.path.expanduser(value))
+
+
+def start_cwd_for(cwd: str, root: str) -> tuple[str, str | None]:
+    """Where the environment starts for the *cwd* Hermes passed, and the value to map.
+
+    A host directory is kept (a session that ``cd``'d elsewhere resumes there,
+    read-only outside the root). Anything else is not a place on this host a
+    command can start in (the ``/root`` container default Hermes before
+    0.22.3 gives every plugin backend, a deleted directory): start at *root*
+    and return the passed value so commands that keep arriving with it are
+    mapped to the tracked cwd.
     """
     expanded = os.path.expanduser(cwd) if cwd else ""
     if expanded and os.path.isabs(expanded) and _usable_dir(expanded):
-        return expanded
-    return default_host_cwd()
+        return expanded, None
+    if cwd:
+        logger.warning("bubblewrap: working directory %r is not a directory on this host; starting in %s", cwd, root)
+    return root, cwd or None
 
 
 PROBE_ARGS: tuple[str, ...] = ("--unshare-user", "--ro-bind", "/", "/", "true")
@@ -942,6 +965,7 @@ class BubblewrapEnvironment(LocalEnvironment):
         *,
         config: BubblewrapConfig | None = None,
         replaced_cwd: str | None = None,
+        root: str | None = None,
     ):
         # Without a config (direct construction), the defaults plus terminal.home_mode as core
         # exports it: that is what decides the subprocess HOME the overlays must leave reachable.
@@ -978,7 +1002,9 @@ class BubblewrapEnvironment(LocalEnvironment):
         )
         self._check_profile_home()
         # The mount paths are fixed here; only --chdir follows the tracked cwd.
-        self._initial_cwd = os.path.realpath(_resolve_local_initial_cwd(cwd))
+        # *root* is the writable root (the bound cwd) and *cwd* only where the
+        # tracked cwd starts; without a root they are the same directory.
+        self._initial_cwd = os.path.realpath(_resolve_local_initial_cwd(root or cwd))
         self._check_initial_cwd()
         self._check_bind_sources()
         sandbox_root = os.path.realpath(get_sandbox_dir())
@@ -992,8 +1018,13 @@ class BubblewrapEnvironment(LocalEnvironment):
         # write to what shows at the hidden file paths.
         self._empty_file = empty_file_path(self._state_dir)
         os.close(os.open(self._empty_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o400))
+        start = self._initial_cwd
+        if root and cwd:
+            candidate = os.path.realpath(_resolve_local_initial_cwd(cwd))
+            if os.path.isdir(candidate) and not masked_inside(self._bwrap_prefix(candidate), candidate):
+                start = candidate
         try:
-            super().__init__(cwd=self._initial_cwd, timeout=timeout, env=env)
+            super().__init__(cwd=start, timeout=timeout, env=env)
         except BaseException:
             self._remove_state()
             raise

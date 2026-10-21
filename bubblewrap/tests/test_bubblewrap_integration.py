@@ -208,6 +208,52 @@ class TestToolIntegration:
         time.sleep(3)
         assert not (work_dir / "bg-marker").exists()
 
+@needs_bwrap
+class TestWritableRootIsConfiguration:
+    """Hermes recreates an environment from the session's recorded cwd (after the idle timeout, for
+    the file tools, for a delegated child). The writable root must stay terminal.cwd: a model's own
+    `cd` moves where commands start, never what they may write."""
+
+    def test_a_cd_does_not_become_writable_when_the_environment_is_recreated(self, isolated_tool, work_dir,
+                                                                               tmp_path):
+        from tools.terminal_tool_lifecycle import _cleanup_inactive_envs
+
+        other = tmp_path / "other"
+        other.mkdir()
+        task = "recreated"
+        r = json.loads(isolated_tool.terminal_tool(f"cd {other} && touch before", task_id=task))
+        assert r["exit_code"] != 0 and "Read-only file system" in r["output"], r
+        _cleanup_inactive_envs(0)
+        assert get_active_env(task) is None
+        r = json.loads(isolated_tool.terminal_tool("pwd; touch after", task_id=task))
+        assert r["output"].splitlines()[0] == str(other), r
+        assert r["exit_code"] != 0 and "Read-only file system" in r["output"], r
+        assert not (other / "after").exists()
+        r = json.loads(isolated_tool.terminal_tool(f"cd {work_dir} && touch inside", task_id=task))
+        assert r["exit_code"] == 0, r
+        assert (work_dir / "inside").is_file()
+
+    def test_cd_to_root_then_recreation_keeps_working(self, isolated_tool, work_dir):
+        from tools.terminal_tool_lifecycle import _cleanup_inactive_envs
+
+        task = "root-cd"
+        assert json.loads(isolated_tool.terminal_tool("cd /", task_id=task))["exit_code"] == 0
+        _cleanup_inactive_envs(0)
+        r = json.loads(isolated_tool.terminal_tool(f"cd {work_dir} && touch ok && pwd", task_id=task))
+        assert r["exit_code"] == 0, r
+        assert (work_dir / "ok").is_file()
+
+    def test_a_missing_terminal_cwd_fails_closed(self, isolated_tool, tmp_path, monkeypatch):
+        # A typo in terminal.cwd must not quietly make the process cwd writable.
+        proc_cwd = tmp_path / "proc_cwd"
+        proc_cwd.mkdir()
+        monkeypatch.chdir(proc_cwd)
+        monkeypatch.setenv("TERMINAL_CWD", str(tmp_path / "work_typo"))
+        r = json.loads(isolated_tool.terminal_tool("touch written_here && pwd", task_id="typo"))
+        assert r["exit_code"] != 0, r
+        assert not (proc_cwd / "written_here").exists()
+
+
 class TestExecuteCodeDispatch:
     def test_execute_code_dispatches_bubblewrap_to_the_env_backed_path(self, isolated_tool):
         """Pins the dispatch: under bubblewrap execute_code must take

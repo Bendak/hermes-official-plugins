@@ -156,10 +156,12 @@ class BubblewrapProvider(TerminalEnvironmentProvider):
     def create_environment(self, *, cwd: str, timeout: int, task_id: str = "default", image: Optional[str] = None,
                            container_config: Optional[dict[str, Any]] = None, **kwargs: Any):
         sandbox = _sandbox()
-        host_cwd = sandbox.host_cwd_for(cwd)
-        replaced = cwd if cwd and host_cwd != cwd else None
-        return sandbox.BubblewrapEnvironment(cwd=host_cwd, timeout=timeout, config=self.load_config(),
-                                             replaced_cwd=replaced)
+        # The writable root comes from terminal.cwd (or where Hermes runs), never from *cwd*: Hermes
+        # passes the session's recorded cwd, which follows the model's own `cd`.
+        root = sandbox.writable_root_for(_terminal_env("TERMINAL_CWD", ""))
+        start, replaced = sandbox.start_cwd_for(cwd, root)
+        return sandbox.BubblewrapEnvironment(cwd=start, timeout=timeout, config=self.load_config(),
+                                             replaced_cwd=replaced, root=root)
 
     # -- the model's view --
     def prompt_note(self, _session_info: Any = None) -> str:
@@ -172,11 +174,21 @@ class BubblewrapProvider(TerminalEnvironmentProvider):
             return ""
         sandbox = _sandbox()
         try:
-            profile = sandbox.resolve_profile(self.load_config().profile)
+            config = self.load_config()
+            profile = sandbox.resolve_profile(config.profile)
         except ValueError:
-            profile = sandbox.resolve_profile(sandbox.DEFAULT_PROFILE)
-        writable = ("the working directory and the scratch directory" if profile.writable_cwd
-                    else "nothing (the working directory is read-only under this profile)")
+            config, profile = None, sandbox.resolve_profile(sandbox.DEFAULT_PROFILE)
+        extra = []
+        if config is not None:
+            extra += [bind.dest for bind in config.binds if not bind.readonly]
+            if config.home_mode in sandbox.PROFILE_HOME_MODES:
+                extra.append("the profile home ($HOME)")
+        if profile.writable_cwd:
+            writable = ", ".join(["the working directory", "the scratch directory", *extra])
+        elif extra:
+            writable = ", ".join(extra) + " (the working directory is read-only under this profile)"
+        else:
+            writable = "nothing (the working directory is read-only under this profile)"
         network = "the host network" if profile.share_net else "no network (loopback only)"
         return (
             f"Terminal sandbox: bubblewrap, profile `{profile.name}`. Every `terminal` and `execute_code` call runs "
