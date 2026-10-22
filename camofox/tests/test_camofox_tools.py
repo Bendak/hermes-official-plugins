@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import json
+import sys
+
+import pytest
 
 from camofox_plugin import camofox_client as client
 from camofox_plugin import camofox_tools as t
@@ -155,6 +158,7 @@ class TestTabTools:
             assert secret not in raw
             assert "[e2]" in _j(raw)["snapshot"]
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="creating a symlink needs Developer Mode or admin on Windows")
     def test_snapshot_store_never_writes_through_a_symlinked_cache_dir(self, camofox, write_config, _isolated_home, tmp_path):
         target = tmp_path / "elsewhere"
         target.mkdir()
