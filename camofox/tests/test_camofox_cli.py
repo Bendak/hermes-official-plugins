@@ -29,3 +29,4 @@ def test_setup_saves_the_url_to_the_profile_env(camofox, monkeypatch, _isolated_
     monkeypatch.setattr(setup, "prompt", lambda *a, **k: next(answers))
     assert cli.cmd_setup(None) == 0
     assert f"CAMOFOX_URL={camofox.url}" in (_isolated_home / ".env").read_text()
+
