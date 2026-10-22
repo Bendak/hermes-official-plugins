@@ -90,6 +90,23 @@ def _tab_action(task_id: Optional[str], suffix: str, body: dict[str, Any], resul
 
 # ---- Tools ----
 
+def _navigate_title(session: dict[str, Any], data: dict) -> str:
+    """The page title: from the navigate reply when present, else from this task's own tab in
+    ``GET /tabs`` (Camofox navigate replies carry no title). Lookup failure degrades to ""."""
+    response_title = data.get("title")
+    if isinstance(response_title, str) and response_title:
+        return response_title
+    try:
+        tabs = client.get("/tabs", params=client.user_params(session)).get("tabs", [])
+        for tab in tabs if isinstance(tabs, list) else []:
+            if isinstance(tab, dict) and tab.get("tabId") == session["tab_id"]:
+                title = tab.get("title")
+                return title if isinstance(title, str) else ""
+    except Exception as exc:
+        logger.debug("Camofox title lookup failed for tab %s: %s", session.get("tab_id"), exc)
+    return ""
+
+
 def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     """Navigate to ``url``; the result carries the title and a compact snapshot."""
     url, policy_error = policy.navigation_policy_error(url)
@@ -98,7 +115,8 @@ def browser_navigate(url: str, task_id: Optional[str] = None) -> str:
     try:
         browser_url, rewrite_info = client.rewrite_loopback_url(url)
         session, data = _navigate_tab(task_id, browser_url)
-        result: dict[str, Any] = {"success": True, "url": data.get("url", browser_url), "title": data.get("title", "")}
+        result: dict[str, Any] = {"success": True, "url": data.get("url", browser_url),
+                                  "title": _navigate_title(session, data)}
         if rewrite_info:
             result["requested_url"], result["url_rewrite"] = url, rewrite_info
             result["warning"] = ("Rewrote loopback URL for Docker-hosted Camofox: "

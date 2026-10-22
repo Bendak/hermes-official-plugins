@@ -23,6 +23,22 @@ class TestNavigate:
         assert created["body"]["listItemId"] == "task_t1"
         assert created["body"]["userId"].startswith("hermes_")
 
+    def test_title_comes_from_the_tasks_own_tab_when_navigate_omits_it(self, camofox):
+        """Camofox navigate replies carry no title; GET /tabs lists it per tab."""
+        camofox.tabs["other"] = {"userId": "someone-else", "listItemId": "x", "url": "https://x", "title": "Other"}
+        t.browser_navigate("https://example.com", task_id="t1")
+        result = _j(t.browser_navigate("https://example.org", task_id="t1"))
+        assert result["title"] == "Example Domain"
+        (lookup, *_) = [c for c in camofox.calls("GET", "/tabs") if c["path"] == "/tabs"]
+        assert lookup["query"] == {"userId": [client.get_session("t1")["user_id"]]}
+
+    def test_title_in_the_navigate_reply_needs_no_lookup(self, camofox):
+        camofox.navigate_title = "From Navigate"
+        t.browser_navigate("https://example.com", task_id="t1")
+        before = len(camofox.calls("GET", "/tabs"))
+        assert _j(t.browser_navigate("https://example.org", task_id="t1"))["title"] == "From Navigate"
+        assert len(camofox.calls("GET", "/tabs")) == before
+
     def test_second_navigate_reuses_the_tab(self, camofox):
         t.browser_navigate("https://example.com", task_id="t1")
         t.browser_navigate("https://example.org", task_id="t1")
