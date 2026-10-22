@@ -145,6 +145,16 @@ class TestTabTools:
         stored = snap.split('path="')[1].split('"')[0]
         assert "[e399]" in open(stored, encoding="utf-8").read()
 
+    def test_filled_password_in_the_snapshot_is_redacted(self, camofox):
+        """Camoufox's aria snapshot prints input values; the ref must survive, the secret must not."""
+        secret = "sk-proj-ABCD1234567890EFGHIJKL"
+        camofox.snapshot = f'- textbox "Password" [e2]: {secret}\n- button "Sign in" [e3]'
+        nav = t.browser_navigate("https://example.com", task_id="t1")
+        snap = t.browser_snapshot(task_id="t1")
+        for raw in (nav, snap):
+            assert secret not in raw
+            assert "[e2]" in _j(raw)["snapshot"]
+
     def test_click_strips_the_at_prefix(self, camofox):
         t.browser_navigate("https://example.com", task_id="t1")
         result = _j(t.browser_click("@e2", task_id="t1"))
@@ -192,6 +202,11 @@ class TestConsole:
         result = _j(t.browser_console("document.title", task_id="t1"))
         assert result == {"success": True, "result": "Example Domain", "result_type": "str"}
         assert camofox.calls("POST", "/evaluate")[0]["body"]["expression"] == "document.title"
+
+    def test_evaluate_before_navigate_opens_no_tab(self, camofox):
+        result = _j(t.browser_console("document.title", task_id="fresh"))
+        assert result["success"] is False and "browser_navigate" in result["error"]
+        assert camofox.calls("POST") == []
 
     def test_eval_result_is_redacted(self, camofox):
         camofox.evaluate_result = "token sk-proj-ABCD1234567890EFGHIJKL"
