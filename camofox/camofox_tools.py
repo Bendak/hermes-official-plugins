@@ -54,7 +54,8 @@ def _fetch_snapshot(session: dict[str, Any]) -> tuple[str, int]:
 
 def _navigate_tab(task_id: Optional[str], browser_url: str) -> tuple[dict[str, Any], dict]:
     """Open ``browser_url`` in the task's tab (creating it if missing) → ``(session, response)``.
-    A 404 on the cached tab means the server garbage-collected it: recreate instead of failing."""
+    A 404 (the server garbage-collected the tab) or 410 (Camofox >= 1.17 after a browser restart)
+    means the cached tab id is dead: recreate instead of failing every call from now on."""
     session = client.get_session(task_id)
     if session["tab_id"]:
         try:
@@ -62,10 +63,10 @@ def _navigate_tab(task_id: Optional[str], browser_url: str) -> tuple[dict[str, A
                                {"userId": session["user_id"], "url": browser_url}, timeout=60)
             return session, data
         except requests.HTTPError as e:
-            if e.response is None or e.response.status_code != 404:
+            if e.response is None or e.response.status_code not in (404, 410):
                 raise
-            logger.warning("Camofox tab %s returned 404 — tab was garbage collected. Creating a fresh tab.",
-                           session["tab_id"])
+            logger.warning("Camofox tab %s returned %s — tab is gone. Creating a fresh tab.",
+                           session["tab_id"], e.response.status_code)
             session["tab_id"] = None
     return client.ensure_tab(task_id, browser_url), {"ok": True, "url": browser_url}
 

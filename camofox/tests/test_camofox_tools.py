@@ -37,6 +37,22 @@ class TestNavigate:
         assert result["success"] is True
         assert len(camofox.calls("POST", "/tabs")) == 2
 
+    def test_tab_gone_after_a_browser_restart_is_recreated(self, camofox):
+        """Camofox >= 1.17 answers 410 Gone for a tab lost in a browser restart."""
+        t.browser_navigate("https://example.com", task_id="t1")
+        camofox.overrides[("POST", "/tabs/tab-1/navigate")] = (410, {"error": "Tab no longer exists", "code": "browser_restarted"})
+        result = _j(t.browser_navigate("https://example.org", task_id="t1"))
+        assert result["success"] is True
+        assert [c["body"]["url"] for c in camofox.calls("POST", "/tabs")] == ["https://example.com", "https://example.org"]
+        assert client.get_session("t1")["tab_id"] == "tab-2"
+
+    def test_other_navigate_errors_keep_the_tab(self, camofox):
+        t.browser_navigate("https://example.com", task_id="t1")
+        camofox.overrides[("POST", "/tabs/tab-1/navigate")] = (500, {"error": "boom"})
+        result = _j(t.browser_navigate("https://example.org", task_id="t1"))
+        assert result["success"] is False and "Navigation failed" in result["error"]
+        assert client.get_session("t1")["tab_id"] == "tab-1"
+
     def test_cloud_metadata_url_is_refused_before_any_request(self, camofox):
         result = _j(t.browser_navigate("http://169.254.169.254/latest/meta-data/", task_id="t1"))
         assert result["success"] is False
