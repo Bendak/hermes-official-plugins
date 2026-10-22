@@ -132,7 +132,26 @@ BROWSER_CONSOLE = {
     }
 }
 
+BROWSER_IMPORT_COOKIES = {
+    "name": "browser_import_cookies",
+    "description": "Import cookies from a Netscape-format cookies.txt file into the current browser session. Use to authenticate to sites without interactive login. Files must live under browser.camofox.cookies_dir (default ~/.camofox/cookies/). Requires CAMOFOX_API_KEY for bearer-token authentication.",
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "cookies_path": {
+                "type": "string",
+                "description": "Path to the Netscape cookies.txt file, relative to browser.camofox.cookies_dir (e.g., 'linkedin.txt')"
+            },
+            "domain_suffix": {
+                "type": "string",
+                "description": "Optional. Only import cookies whose domain ends with this suffix (e.g., '.linkedin.com')"
+            }
+        },
+        "required": ["cookies_path"]
+    }
+}
+
 ALL_SCHEMAS = (
     BROWSER_NAVIGATE, BROWSER_SNAPSHOT, BROWSER_CLICK, BROWSER_TYPE, BROWSER_SCROLL, BROWSER_BACK,
-    BROWSER_PRESS, BROWSER_GET_IMAGES, BROWSER_VISION, BROWSER_CONSOLE,
+    BROWSER_PRESS, BROWSER_GET_IMAGES, BROWSER_VISION, BROWSER_CONSOLE, BROWSER_IMPORT_COOKIES,
 )

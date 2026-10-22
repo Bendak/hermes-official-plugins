@@ -10,7 +10,8 @@ Hermes browses with a local anti-detection browser and no cloud dependency.
 
 It registers the browser tools skills already call, in the `camofox` toolset:
 `browser_navigate`, `browser_snapshot`, `browser_click`, `browser_type`, `browser_scroll`,
-`browser_back`, `browser_press`, `browser_get_images`, `browser_vision` and `browser_console`.
+`browser_back`, `browser_press`, `browser_get_images`, `browser_vision` and `browser_console`, plus
+`browser_import_cookies` when a Camofox API key is set.
 
 **If you already used Camofox with Hermes, you don't need to change anything:** `CAMOFOX_URL`, the
 other `CAMOFOX_*` variables and every `browser.camofox.*` config key work as before, and with
@@ -138,6 +139,26 @@ Adoption only reuses a tab whose `listItemId` equals the session key. With no su
 profile). To make Hermes attach to the tab another app opened, set `session_key` to the key that app
 used when it created the tab.
 
+## Cookie import
+
+`browser_import_cookies` loads a Netscape-format `cookies.txt` (exported with a "cookies.txt"
+browser extension) into the current Camofox user, so the agent can reach sites you are signed in to
+without an interactive login. It is offered only when `CAMOFOX_API_KEY` is set, and the Camofox
+server must run with the same key (`-e CAMOFOX_API_KEY=...`):
+
+```bash
+openssl rand -hex 32          # put the value in ~/.hermes/.env as CAMOFOX_API_KEY and on the server
+mkdir -p ~/.camofox/cookies
+cp ~/Downloads/linkedin_cookies.txt ~/.camofox/cookies/linkedin.txt
+```
+
+Then ask: *"Import my LinkedIn cookies from linkedin.txt, then open my feed."* Files must sit under
+`browser.camofox.cookies_dir` (default `~/.camofox/cookies`); absolute paths and `../` are refused,
+files are capped at 5 MB and 500 cookies, `domain_suffix` filters to one site, and cookie values are
+never logged. Imported cookies belong to the session's Camofox user: with
+`browser.camofox.managed_persistence: true` later navigations keep that identity; with the default
+ephemeral identity they last only while the same Camofox session lives.
+
 ## Configuration reference
 
 | Key | Default | Meaning |
@@ -147,6 +168,7 @@ used when it created the tab.
 | `browser.command_timeout` | `30` | Per-request timeout in seconds (floor 5; navigation allows 60). |
 | `browser.snapshot_threshold` | `15000` | Snapshots longer than this are cut at a line boundary; the full tree is saved under `cache/web` and the cut says how to page it with `read_file`. |
 | `browser.restrict_evaluate` | `false` | Refuse `browser_console(expression=...)` that names sensitive primitives (cookies, storage, network calls). `browser.allow_unsafe_evaluate: true` overrides it. |
+| `browser.camofox.cookies_dir` | `~/.camofox/cookies` | Where `browser_import_cookies` reads cookie files. |
 | `auxiliary.camofox_vision.*` | inherits `auxiliary.vision` | Model used by `browser_vision`. |
 
 Navigation refuses URLs that carry a Hermes secret, cloud-metadata endpoints, and hosts in your

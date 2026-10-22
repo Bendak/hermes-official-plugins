@@ -64,6 +64,9 @@ def register(ctx) -> None:
     for schema, handler, emoji in tools:
         ctx.register_tool(name=schema["name"], toolset=TOOLSET, schema=schema, handler=handler,
                           check_fn=t.check_camofox_configured, emoji=emoji)
+    # Offered only with CAMOFOX_API_KEY set: the server's cookie route checks that bearer token.
+    ctx.register_tool(name=s.BROWSER_IMPORT_COOKIES["name"], toolset=TOOLSET, schema=s.BROWSER_IMPORT_COOKIES,
+                      handler=t.handle_import_cookies, check_fn=t.check_cookie_import_available, emoji="🍪")
 
     def _on_session_finalize(session_id=None, **_):
         if session_id:
