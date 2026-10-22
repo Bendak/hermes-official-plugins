@@ -44,9 +44,12 @@ def _snapshot_data(session: dict[str, Any]) -> dict:
 
 
 def _fetch_snapshot(session: dict[str, Any]) -> tuple[str, int]:
-    """``(snapshot_text, refs_count)``, cut at ``browser.snapshot_threshold`` with the full tree stored."""
+    """``(snapshot_text, refs_count)``, cut at ``browser.snapshot_threshold`` with the full tree stored.
+
+    Camoufox's aria snapshot prints a filled input's value (a typed or vault-filled password included),
+    so the text crosses the same redaction boundary as every other browser read."""
     data = _snapshot_data(session)
-    snapshot, threshold = data.get("snapshot", ""), policy.snapshot_threshold()
+    snapshot, threshold = policy.redact_text(data.get("snapshot", "")), policy.snapshot_threshold()
     if len(snapshot) > threshold:
         snapshot = policy.truncate_snapshot(snapshot, max_chars=threshold)
     return snapshot, data.get("refsCount", 0)
@@ -220,7 +223,11 @@ def _parse_eval_value(raw: Any) -> Any:
 
 def _evaluate(expression: str, task_id: Optional[str]) -> str:
     try:
-        session = client.ensure_tab(task_id)
+        # Never open a tab just to evaluate: a blank tab in a shared Camofox profile is a side effect,
+        # and with adopt_existing_tab it could later be adopted in place of the real one.
+        session = client.get_session(task_id)
+        if not session["tab_id"]:
+            return _fail(client.NO_SESSION_ERROR)
         resp = client.post(client.tab_path(session, "evaluate"),
                            {"expression": expression, "userId": session["user_id"]})
         parsed = _parse_eval_value(resp.get("result") if isinstance(resp, dict) else resp)
