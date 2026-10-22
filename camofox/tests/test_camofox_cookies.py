@@ -48,6 +48,13 @@ class TestReadCookieFile:
             with pytest.raises(ValueError, match="relative path"):
                 t._read_cookie_file(bad)
 
+    def test_the_dir_itself_is_not_a_cookie_file(self, cookies_dir, camofox, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_API_KEY", "k")
+        (cookies_dir / "sub").mkdir()
+        for path in ("", "sub"):
+            result = json.loads(t.browser_import_cookies(path, task_id="t1"))
+            assert result["success"] is False and "not found" in result["error"]
+
     def test_oversized_file_is_refused(self, cookies_dir):
         (cookies_dir / "big.txt").write_text("x" * (6 * 1024 * 1024))
         with pytest.raises(ValueError, match="too large"):

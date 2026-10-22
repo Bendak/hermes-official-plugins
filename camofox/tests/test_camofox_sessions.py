@@ -108,15 +108,26 @@ class TestDeadTab:
         assert client.get_session("t1")["tab_id"] is None
         assert json.loads(t.browser_navigate("https://example.com", task_id="t1"))["success"] is True
 
-    def test_tab_reopened_under_the_session_key_is_picked_up(self, camofox, monkeypatch):
+    def _reopened(self, camofox, monkeypatch):
         monkeypatch.setenv("CAMOFOX_USER_ID", "shared-user")
         monkeypatch.setenv("CAMOFOX_SESSION_KEY", "our-session")
         t.browser_navigate("https://example.com", task_id="t1")
         camofox.tabs.clear()
         camofox.tabs["reopened"] = {"userId": "shared-user", "listItemId": "our-session", "url": "https://x", "title": "X"}
-        assert json.loads(t.browser_click("@e1", task_id="t1"))["success"] is True
+
+    def test_a_read_continues_in_the_tab_reopened_under_the_session_key(self, camofox, monkeypatch):
+        self._reopened(camofox, monkeypatch)
+        assert json.loads(t.browser_snapshot(task_id="t1"))["success"] is True
         assert client.get_session("t1")["tab_id"] == "reopened"
-        assert camofox.calls("POST", "/click")[-1]["path"] == "/tabs/reopened/click"
+
+    def test_an_input_action_is_not_replayed_on_the_reopened_tab(self, camofox, monkeypatch):
+        """The ref came from the old page; on the new one it names some other element."""
+        self._reopened(camofox, monkeypatch)
+        result = json.loads(t.browser_type("@e7", "hunter2-password", task_id="t1"))
+        assert result["success"] is False and "call browser_snapshot" in result["error"]
+        assert "https://x" in result["error"]
+        assert [c["path"] for c in camofox.calls("POST", "/type")] == ["/tabs/tab-1/type"]
+        assert client.get_session("t1")["tab_id"] == "reopened"
 
     def test_a_404_on_a_live_tab_is_reported_as_is(self, camofox):
         t.browser_navigate("https://example.com", task_id="t1")
