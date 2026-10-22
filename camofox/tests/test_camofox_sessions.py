@@ -74,6 +74,22 @@ class TestAdoption:
         assert json.loads(t.browser_snapshot(task_id="t1"))["success"] is True
         assert camofox.calls("POST", "/tabs") == []
 
+    def test_never_adopts_another_sessions_tab(self, camofox, monkeypatch):
+        self._external(monkeypatch)
+        camofox.tabs["other"] = {"userId": "shared-user", "listItemId": "another-session", "url": "https://x", "title": "X"}
+        camofox.tabs["newer"] = {"userId": "shared-user", "listItemId": "", "url": "https://y", "title": "Y"}
+        assert client.get_session("t1")["tab_id"] is None
+        assert json.loads(t.browser_navigate("https://example.com", task_id="t1"))["success"] is True
+        (created,) = camofox.calls("POST", "/tabs")
+        assert created["body"]["listItemId"] == "our-session"
+        assert client.get_session("t1")["tab_id"] not in {"other", "newer"}
+
+    def test_adopts_only_the_matching_tab_among_several(self, camofox, monkeypatch):
+        self._external(monkeypatch)
+        camofox.tabs["ours"] = {"userId": "shared-user", "listItemId": "our-session", "url": "https://x", "title": "X"}
+        camofox.tabs["other"] = {"userId": "shared-user", "listItemId": "another-session", "url": "https://y", "title": "Y"}
+        assert client.get_session("t1")["tab_id"] == "ours"
+
     def test_no_adoption_without_the_flag(self, camofox, monkeypatch):
         monkeypatch.setenv("CAMOFOX_USER_ID", "shared-user")
         camofox.tabs["ext-tab"] = {"userId": "shared-user", "listItemId": "x", "url": "https://x", "title": "X"}

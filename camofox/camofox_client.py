@@ -253,8 +253,8 @@ def user_params(session: dict[str, Any]) -> dict[str, str]:
 
 
 def _adopt_existing_tab(session: dict[str, Any]) -> dict[str, Any]:
-    """Rehydrate ``tab_id`` from an already-open managed tab: a restart empties the in-memory map
-    while Camofox still holds the integration-owned tab."""
+    """Rehydrate ``tab_id`` from an already-open tab with this session's key: a restart empties the
+    in-memory map while Camofox still holds the integration-owned tab."""
     if session.get("tab_id") or not session.get("adopt_existing_tab") or not get_camofox_url():
         return session
     try:
@@ -263,7 +263,9 @@ def _adopt_existing_tab(session: dict[str, Any]) -> dict[str, Any]:
         logger.debug("Camofox tab adoption failed for %s: %s", session.get("user_id"), exc)
         return session
     dict_tabs = [tab for tab in tabs if isinstance(tab, dict)] if isinstance(tabs, list) else []
-    candidates = [tab for tab in dict_tabs if tab.get("listItemId") == session.get("session_key")] or dict_tabs
+    # Only this session's own tabs: falling back to any tab of a shared userId attached Hermes to a tab
+    # another session was driving. No match means browser_navigate opens a tab under our session key.
+    candidates = [tab for tab in dict_tabs if tab.get("listItemId") == session.get("session_key")]
     tab_id = candidates[-1].get("tabId") if candidates else None
     if isinstance(tab_id, str) and tab_id:
         session["tab_id"] = tab_id
