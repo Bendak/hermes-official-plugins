@@ -190,10 +190,11 @@ Catalog entries come in two tiers:
 </tr>
 <tr>
 <td width="50%" valign="top">
-<h3><a href="advanced-delegation/">Advanced Delegation</a> <sup>needs the next Hermes release</sup></h3>
-<code>hermes plugins install NousResearch/hermes-official-plugins#advanced-delegation</code>
+<a href="advanced-delegation/"><img src="assets/advanced-delegation.jpg" alt="Advanced Delegation plugin"></a>
+<h3><a href="advanced-delegation/">Advanced Delegation</a></h3>
+<code>hermes plugins install advanced-delegation</code>
 <p>Two more ways for <code>delegate_task</code> to route subagents. <b>Model routes</b>: the agent picks a named model route per subagent (fast, deep, local...) from a list you write. <b>Profile routes</b>: it runs a subagent as one of your Hermes profiles, with that profile's model, skills and credentials. Only the names and your one-line descriptions reach the model.</p>
-<p><code>hermes delegation config</code> · <code>/delegation</code> to switch modes in a chat</p>
+<p><code>hermes delegation config</code> · <code>/delegation</code> to switch modes in a chat · Hermes 0.22.5+</p>
 </td>
 <td width="50%" valign="top">
 <h3>More on the way</h3>
