@@ -19,10 +19,9 @@ Only the names and the one-line descriptions you write reach the model. The raw 
 id, endpoint and key never become tool parameters, so the agent cannot invent a route.
 
 > [!IMPORTANT]
-> Needs a Hermes core with pluggable delegation providers (`ctx.register_delegation_provider`,
-> added by the hermes-agent PR *feat(delegation): pluggable delegation providers*, not in a release
-> yet). On an older core the plugin installs and loads but does nothing (it logs one warning).
-> A plugin catalog listing comes later, once a Hermes release carries that change.
+> Needs Hermes 0.22.5 or newer, the first release with pluggable delegation providers
+> (`ctx.register_delegation_provider`). The plugin catalog listing requires it; installed on an
+> older core some other way, the plugin loads but does nothing (it logs one warning).
 
 ## How it works
 
@@ -49,9 +48,18 @@ cache of a running conversation is never disturbed).
 
 ## Install
 
+From the [Hermes plugin catalog](https://hermes-agent.nousresearch.com/docs/plugins) (pinned to a
+reviewed commit; needs Hermes 0.22.5 or newer):
+
 ```bash
-hermes plugins install NousResearch/hermes-official-plugins#advanced-delegation --enable
+hermes plugins install advanced-delegation
 ```
+
+In the Desktop app: **Settings → Model → Subagents → Install plugin** (the button shows under the
+mode picker while the plugin is missing).
+
+To follow this repo's `main` instead of the catalog pin:
+`hermes plugins install NousResearch/hermes-official-plugins#advanced-delegation --enable`.
 
 Plugins are installed per profile; install and configure it in the profile that delegates. Target
 profiles of profile routes need nothing installed: they only have to exist (`hermes profile list`)
