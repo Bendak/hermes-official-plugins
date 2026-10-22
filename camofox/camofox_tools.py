@@ -77,14 +77,17 @@ def _navigate_tab(task_id: Optional[str], browser_url: str) -> tuple[dict[str, A
 
 _TAB_GONE_ERROR = ("The browser tab is gone (the Camofox server reaped it or restarted). "
                    "Call browser_navigate to open the page again.")
+_TAB_CHANGED_ERROR = ("The browser tab was replaced (the Camofox server reaped or restarted it); now on {url}. "
+                      "Element refs from earlier snapshots no longer apply: call browser_snapshot, then retry.")
 
 
 def _tab_gone(exc: BaseException) -> bool:
     return isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code in (404, 410)
 
 
-def _run_on_tab(session: dict[str, Any], body: Callable[[dict[str, Any]], str]) -> str:
-    """``body(session)``; when the server says the cached tab is gone, resync once and retry."""
+def _run_on_tab(session: dict[str, Any], body: Callable[[dict[str, Any]], str], *, read_only: bool = False) -> str:
+    """``body(session)``; when the server says the cached tab is gone, resync. A read retries on the
+    live tab; an input action does not, because its element ref came from the old page."""
     tracked = session["tab_id"]
     try:
         return body(session)
@@ -96,16 +99,26 @@ def _run_on_tab(session: dict[str, Any], body: Callable[[dict[str, Any]], str]) 
         if session["tab_id"] == tracked:  # the tab is alive: the 404 was about something else
             raise
         logger.info("Camofox tab %s was gone; continuing in live tab %s", tracked, session["tab_id"])
+        if not read_only:
+            return _fail(_TAB_CHANGED_ERROR.format(url=_tab_url(session) or "another page"))
         return body(session)
 
 
-def _with_tab(task_id: Optional[str], body: Callable[[dict[str, Any]], str]) -> str:
+def _tab_url(session: dict[str, Any]) -> str:
+    try:
+        tabs = client.get("/tabs", params=client.user_params(session), timeout=5).get("tabs", [])
+        return next((t.get("url", "") for t in tabs if isinstance(t, dict) and t.get("tabId") == session["tab_id"]), "")
+    except Exception:
+        return ""
+
+
+def _with_tab(task_id: Optional[str], body: Callable[[dict[str, Any]], str], *, read_only: bool = False) -> str:
     """Run ``body(session)`` on the task's existing tab; no tab → the navigate-first error."""
     try:
         session = client.get_session(task_id)
         if not session["tab_id"]:
             return _fail(client.NO_SESSION_ERROR)
-        return _run_on_tab(session, body)
+        return _run_on_tab(session, body, read_only=read_only)
     except Exception as e:
         return _fail(str(e))
 
@@ -171,7 +184,7 @@ def browser_snapshot(task_id: Optional[str] = None) -> str:
     def body(session):
         snapshot, refs_count = _fetch_snapshot(session)
         return _dumps({"success": True, "snapshot": snapshot, "element_count": refs_count})
-    return _with_tab(task_id, body)
+    return _with_tab(task_id, body, read_only=True)
 
 
 def browser_click(ref: str, task_id: Optional[str] = None) -> str:
@@ -234,9 +247,9 @@ def _parse_snapshot_images(snapshot: str) -> list[dict[str, str]]:
 
 def browser_get_images(task_id: Optional[str] = None) -> str:
     def body(session):
-        images = _parse_snapshot_images(_snapshot_data(session).get("snapshot", ""))
+        images = policy.redact_output(_parse_snapshot_images(_snapshot_data(session).get("snapshot", "")))
         return _dumps({"success": True, "images": images, "count": len(images)})
-    return _with_tab(task_id, body)
+    return _with_tab(task_id, body, read_only=True)
 
 
 def _parse_eval_value(raw: Any) -> Any:
@@ -263,9 +276,11 @@ def _evaluate(expression: str, task_id: Optional[str]) -> str:
             return _dumps({"success": True, "result": policy.redact_output(parsed),
                            "result_type": type(parsed).__name__}, default=str)
         return _run_on_tab(session, body)
-    except Exception as e:
-        if any(code in str(e) for code in ("404", "405", "501")):  # a server without /evaluate
+    except requests.HTTPError as e:
+        if e.response is not None and e.response.status_code in (404, 405, 501):  # no /evaluate on this server
             return _dumps({"success": False, "error": _EVAL_UNSUPPORTED})
+        return _fail(str(e))
+    except Exception as e:
         return _fail(str(e))
 
 
@@ -324,7 +339,7 @@ def browser_vision(question: str, task_id: Optional[str] = None, *, llm: Any = N
         analysis = (result.text or "").strip() or "Vision analysis returned no content."
         # Secrets the vision model read off the page never reach the conversation.
         return _dumps({"success": True, "analysis": policy.redact_text(analysis), "screenshot_path": screenshot_path})
-    return _with_tab(task_id, body)
+    return _with_tab(task_id, body, read_only=True)
 
 
 # ---- Cookie import ----
@@ -369,7 +384,7 @@ def _read_cookie_file(cookies_path: str, domain_suffix: Optional[str] = None) ->
     resolved = os.path.realpath(os.path.join(base, cookies_path))
     if not (resolved == base or resolved.startswith(base + os.sep)):
         raise ValueError("cookies_path must be a relative path within the cookies directory")
-    if not os.path.exists(resolved):
+    if not os.path.isfile(resolved):
         raise FileNotFoundError(f"Cookie file not found: {cookies_path}")
     size = os.path.getsize(resolved)
     if size > _COOKIE_MAX_BYTES:
@@ -389,7 +404,7 @@ def browser_import_cookies(cookies_path: str, domain_suffix: Optional[str] = Non
                      "CAMOFOX_API_KEY on both the Camofox server and Hermes.")
     try:
         cookies = _read_cookie_file(cookies_path, domain_suffix)
-    except (ValueError, FileNotFoundError) as exc:
+    except (ValueError, OSError) as exc:
         return _fail(str(exc))
     if not cookies:
         return _fail("No cookies found in file (after optional domain filter).")

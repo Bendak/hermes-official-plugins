@@ -155,6 +155,18 @@ class TestTabTools:
             assert secret not in raw
             assert "[e2]" in _j(raw)["snapshot"]
 
+    def test_snapshot_store_never_writes_through_a_symlinked_cache_dir(self, camofox, write_config, _isolated_home, tmp_path):
+        target = tmp_path / "elsewhere"
+        target.mkdir()
+        (_isolated_home / "cache").mkdir()
+        (_isolated_home / "cache" / "web").symlink_to(target, target_is_directory=True)
+        write_config("browser:\n  snapshot_threshold: 1000\n")
+        camofox.snapshot = "\n".join(f'- link "item {i}" [e{i}]' for i in range(400))
+        t.browser_navigate("https://example.com", task_id="t1")
+        snap = _j(t.browser_snapshot(task_id="t1"))["snapshot"]
+        assert "more lines truncated" in snap and "read_file" not in snap
+        assert list(target.iterdir()) == []
+
     def test_click_strips_the_at_prefix(self, camofox):
         t.browser_navigate("https://example.com", task_id="t1")
         result = _j(t.browser_click("@e2", task_id="t1"))
@@ -184,6 +196,20 @@ class TestTabTools:
         assert _j(t.browser_scroll("sideways", task_id="t1"))["success"] is False
         assert _j(t.browser_back(task_id="t1"))["success"] is True
         assert _j(t.browser_press("Enter", task_id="t1"))["pressed"] == "Enter"
+
+    def test_server_error_text_reaches_the_model(self, camofox):
+        """Camofox explains a stale ref in the body; the status line alone does not say what to do."""
+        t.browser_navigate("https://example.com", task_id="t1")
+        camofox.overrides[("POST", "/tabs/tab-1/click")] = (
+            422, {"error": "Unknown ref: e9", "code": "stale_refs", "recovery": "snapshot_then_retry"})
+        result = _j(t.browser_click("@e9", task_id="t1"))
+        assert result["success"] is False
+        assert "stale_refs" in result["error"] and "snapshot_then_retry" in result["error"]
+
+    def test_get_images_redacts_like_the_snapshot(self, camofox):
+        camofox.snapshot = '- img "key sk-proj-ABCD1234567890EFGHIJKL"\n  /url: https://x.com/i.png?k=sk-proj-ABCD1234567890EFGHIJKL'
+        t.browser_navigate("https://example.com", task_id="t1")
+        assert "ABCD1234567890EFGHIJKL" not in t.browser_get_images(task_id="t1")
 
     def test_get_images_parses_the_snapshot(self, camofox):
         camofox.snapshot = '- img "Logo"\n  /url: https://x.com/img.png\n- button "Go" [e1]'
@@ -219,6 +245,16 @@ class TestConsole:
         result = _j(t.browser_console('document["coo" + "kie"]', task_id="t1"))
         assert result["success"] is False and "document.cookie" in result["error"]
         assert camofox.calls("POST", "/evaluate") == []
+
+    def test_a_javascript_error_is_not_mistaken_for_a_missing_endpoint(self, camofox, monkeypatch):
+        """The status code decides, not a "404" that happens to appear in the tab id or port."""
+        t.browser_navigate("https://example.com", task_id="t1")
+        session = client.get_session("t1")
+        camofox.tabs["a1b2404c"] = camofox.tabs.pop("tab-1")
+        session["tab_id"] = "a1b2404c"
+        camofox.overrides[("POST", "/tabs/a1b2404c/evaluate")] = (500, {"error": "ReferenceError: foo is not defined"})
+        result = _j(t.browser_console("foo", task_id="t1"))
+        assert "not supported" not in result["error"] and "ReferenceError" in result["error"]
 
     def test_server_without_evaluate(self, camofox):
         t.browser_navigate("https://example.com", task_id="t1")

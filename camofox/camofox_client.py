@@ -203,11 +203,29 @@ def get_vnc_url() -> Optional[str]:
 
 # ---- HTTP helpers ----
 
+def _error_detail(resp: requests.Response) -> str:
+    """The server's own explanation (``error`` / ``code`` / ``recovery``), e.g. ``stale_refs``."""
+    try:
+        body = resp.json()
+    except ValueError:
+        return ""
+    if not isinstance(body, dict):
+        return ""
+    return "; ".join(f"{k}: {body[k]}" for k in ("error", "code", "recovery") if body.get(k))
+
+
 def request(method: str, path: str, timeout: Optional[int] = None, **kwargs: Any) -> requests.Response:
-    """Authenticated request to the Camofox server; returns the raised-for-status response."""
+    """Authenticated request to the Camofox server; returns the response, or raises ``HTTPError``
+    carrying the server's error text (``str(HTTPError)`` alone drops the body)."""
     resp = getattr(requests, method)(f"{get_camofox_url()}{path}", headers=_auth_headers(),
                                      timeout=get_command_timeout() if timeout is None else timeout, **kwargs)
-    resp.raise_for_status()
+    try:
+        resp.raise_for_status()
+    except requests.HTTPError as exc:
+        detail = _error_detail(resp)
+        if detail:
+            raise requests.HTTPError(f"{exc} ({detail})", response=resp) from exc
+        raise
     return resp
 
 
@@ -279,8 +297,12 @@ def get_session(task_id: Optional[str]) -> dict[str, Any]:
     random ephemeral userId."""
     key = _session_key(task_id)
     with _sessions_lock:
+        session = _sessions.get(key)
+    if session is not None:
+        return _adopt_existing_tab(session)  # network I/O stays outside the lock
+    with _sessions_lock:
         if key in _sessions:
-            return _adopt_existing_tab(_sessions[key])
+            return _sessions[key]
         camofox_cfg = get_camofox_config()
         identity = _camofox_identity_override(key[1], camofox_cfg)
         if identity is None and _managed_persistence_enabled(camofox_cfg):
@@ -293,7 +315,7 @@ def get_session(task_id: Optional[str]) -> dict[str, Any]:
         session = {"user_id": identity["user_id"], "tab_id": None, "session_key": identity["session_key"],
                    "managed": managed, "adopt_existing_tab": adopt}
         _sessions[key] = session
-        return _adopt_existing_tab(session)
+    return _adopt_existing_tab(session)
 
 
 def resync_tab(session: dict[str, Any]) -> bool:

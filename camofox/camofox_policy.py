@@ -1,9 +1,10 @@
 """Safety and output shaping for the Camofox browser tools.
 
-* Navigation policy, same floors core applied to a Camofox navigation: URLs carrying a Hermes
-  secret are refused, cloud-metadata endpoints are refused unconditionally, and the user's website
-  blocklist (``security.website_blocklist``) applies. Camofox counted as a local browser in core,
-  so private/LAN addresses stay reachable, as before.
+* Navigation policy, the checks core ran before a Camofox navigation: URLs carrying a Hermes
+  secret, cloud-metadata endpoints and hosts on the user's website blocklist
+  (``security.website_blocklist``) are refused before the request is sent. Camofox counted as a
+  local browser in core, so private/LAN addresses stay reachable, as before; like core's Camofox
+  path, a redirect or in-page navigation is not re-checked.
 * ``browser.restrict_evaluate`` / ``browser.allow_unsafe_evaluate``: the opt-in denylist of
   sensitive JavaScript primitives for ``browser_console(expression=...)``.
 * Oversized snapshots are cut at a line boundary; the full tree is stored (secrets force-redacted)
@@ -222,6 +223,8 @@ def _store_full_snapshot(snapshot_text: str) -> Optional[str]:
             content = (content[:MAX_STORED_SNAPSHOT_CHARS]
                        + f"\n\n[... stored copy truncated at {MAX_STORED_SNAPSHOT_CHARS:,} chars of {len(content):,} ...]")
         cache_dir = get_hermes_dir("cache/web", "web_cache")
+        if cache_dir.is_symlink():
+            raise OSError(f"refusing to write through a symlinked {cache_dir}")
         cache_dir.mkdir(parents=True, exist_ok=True)
         digest = hashlib.sha256(content.encode("utf-8")).hexdigest()[:10]
         path = str(cache_dir / f"browser-snapshot-{digest}.txt")
