@@ -193,6 +193,10 @@ plugin seam yet. Each is imported at its point of use:
 | `agent.redact.redact_sensitive_text`, `agent.redact._PREFIX_RE` | secret redaction in tool output; refusing URLs that embed a secret |
 | `tools.credential_files.to_agent_visible_cache_path` | the stored-snapshot path as the agent's file tools see it (Docker/SSH terminals) |
 
+Vault fill (`browser_vault` filling a login form) does not reach the Camofox tab: core's vault tool
+would need a seam to evaluate its fill script through the active browser backend. Until then, type
+credentials with `browser_type`; snapshots redact filled values either way.
+
 ## License
 
 MIT
