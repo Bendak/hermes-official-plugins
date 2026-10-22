@@ -296,6 +296,26 @@ def get_session(task_id: Optional[str]) -> dict[str, Any]:
         return _adopt_existing_tab(session)
 
 
+def resync_tab(session: dict[str, Any]) -> bool:
+    """After the server answered 404/410 for the cached tab: True when a live tab is tracked again.
+
+    The server reaps idle tabs and drops them all on a browser restart while the session map keeps
+    the dead id. Keep the tracked tab if the server still lists it (the error was about something
+    else), else take a live tab carrying this session's key (an integration may have reopened it);
+    otherwise forget the dead id so the caller can say "navigate again"."""
+    try:
+        tabs = get("/tabs", params=user_params(session), timeout=5).get("tabs", [])
+    except Exception as exc:
+        logger.debug("Camofox tab resync failed for %s: %s", session.get("user_id"), exc)
+        return False
+    live = [tab for tab in tabs if isinstance(tab, dict) and tab.get("tabId")] if isinstance(tabs, list) else []
+    if any(tab.get("tabId") == session.get("tab_id") for tab in live):
+        return True
+    mine = [tab for tab in live if tab.get("listItemId") == session.get("session_key")]
+    session["tab_id"] = mine[-1]["tabId"] if mine else None
+    return bool(mine)
+
+
 def ensure_tab(task_id: Optional[str], url: str = "about:blank") -> dict[str, Any]:
     """The task's session with a tab, creating one at ``url`` if needed."""
     session = get_session(task_id)

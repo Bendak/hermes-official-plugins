@@ -94,3 +94,33 @@ class TestAdoption:
         monkeypatch.setenv("CAMOFOX_USER_ID", "shared-user")
         camofox.tabs["ext-tab"] = {"userId": "shared-user", "listItemId": "x", "url": "https://x", "title": "X"}
         assert client.get_session("t1")["tab_id"] is None
+
+
+class TestDeadTab:
+    """The server reaps idle tabs (and drops all of them on a browser restart) while Hermes still
+    holds the tab id."""
+
+    def test_reaped_tab_says_navigate_again_and_forgets_the_id(self, camofox):
+        t.browser_navigate("https://example.com", task_id="t1")
+        camofox.tabs.clear()
+        result = json.loads(t.browser_snapshot(task_id="t1"))
+        assert result["success"] is False and "Call browser_navigate" in result["error"]
+        assert client.get_session("t1")["tab_id"] is None
+        assert json.loads(t.browser_navigate("https://example.com", task_id="t1"))["success"] is True
+
+    def test_tab_reopened_under_the_session_key_is_picked_up(self, camofox, monkeypatch):
+        monkeypatch.setenv("CAMOFOX_USER_ID", "shared-user")
+        monkeypatch.setenv("CAMOFOX_SESSION_KEY", "our-session")
+        t.browser_navigate("https://example.com", task_id="t1")
+        camofox.tabs.clear()
+        camofox.tabs["reopened"] = {"userId": "shared-user", "listItemId": "our-session", "url": "https://x", "title": "X"}
+        assert json.loads(t.browser_click("@e1", task_id="t1"))["success"] is True
+        assert client.get_session("t1")["tab_id"] == "reopened"
+        assert camofox.calls("POST", "/click")[-1]["path"] == "/tabs/reopened/click"
+
+    def test_a_404_on_a_live_tab_is_reported_as_is(self, camofox):
+        t.browser_navigate("https://example.com", task_id="t1")
+        camofox.overrides[("POST", "/tabs/tab-1/click")] = (404, {"error": "ref e9 not found"})
+        result = json.loads(t.browser_click("@e9", task_id="t1"))
+        assert result["success"] is False and "404" in result["error"]
+        assert client.get_session("t1")["tab_id"] == "tab-1"
