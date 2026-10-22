@@ -38,17 +38,38 @@ The tools appear once `CAMOFOX_URL` is set and the `camofox` toolset is enabled
 
 ## Run the Camofox server
 
+Camofox's own quick start is native Node, no Docker; that path also works on Windows:
+
+```bash
+git clone https://github.com/jo-inc/camofox-browser
+cd camofox-browser
+npm install && npm start
+# -> http://localhost:9377
+```
+
+The first run downloads Camoufox (hundreds of MB). `GET http://localhost:9377/health` should report
+`ok: true`. Shorthand: `npx @askjo/camofox-browser`. To use Hermes-managed Node instead of a system
+install, put `~/.hermes/node` on `PATH` (Windows default profile: `%LOCALAPPDATA%\hermes\node`).
+
+**Headed vs headless (native installs).** The lever is `interactive.mode` in `camofox.config.json`
+(or the `CAMOFOX_INTERACTIVE` env var): `off` (default, headless), `desktop` (a visible Camoufox
+window for manual logins), `novnc`, or `auto`. Restart the Camofox server after changing it.
+
+### Docker
+
 ```bash
 docker run -d -p 9377:9377 -e CAMOFOX_PORT=9377 ghcr.io/jo-inc/camofox-browser:latest
 ```
+
+Docker's headed path is VNC (`ENABLE_VNC=1`); builds with VNC, a persistent profile directory or a
+larger Node heap are described in the [camofox-browser README](https://github.com/jo-inc/camofox-browser).
+
+Then point Hermes at the server:
 
 ```bash
 # ~/.hermes/.env
 CAMOFOX_URL=http://localhost:9377
 ```
-
-Builds with VNC, a persistent profile directory or a larger Node heap are described in the
-[camofox-browser README](https://github.com/jo-inc/camofox-browser).
 
 ### Docker: opening pages served from the host
 
@@ -81,6 +102,24 @@ browser:
 Hermes then sends a deterministic `userId` derived from the profile's `browser_auth/camofox/` path,
 so each Hermes profile gets its own Camofox browser profile, and it skips the server-side session
 delete at the end of a session. The Camofox server must map that `userId` to a persistent profile.
+
+Ending a Hermes session does **not** close the Camofox session: Hermes only drops its local entry and
+the browser context keeps running, with live cookies held in that open context, not yet on disk.
+Camofox writes them to disk at a checkpoint: `POST /stop` (needs `CAMOFOX_ADMIN_KEY`, sent as
+`x-admin-key`) or a graceful Node shutdown (`SIGINT` / `SIGTERM`). Killing Node (`kill -9`,
+`taskkill /F`, Task Manager) skips the shutdown hook and drops logins that were never checkpointed.
+
+Headed login, then headless reuse:
+
+1. Start Camofox with `interactive.mode` (or `CAMOFOX_INTERACTIVE`) set to `desktop`.
+2. Start Hermes, open a login site in a browser task, and sign in in the visible window.
+3. Checkpoint without killing Node:
+   ```bash
+   curl -X POST http://localhost:9377/stop -H "x-admin-key: $CAMOFOX_ADMIN_KEY"
+   ```
+   State lands under `~/.camofox/profiles/` on the server. `POST /stop` answers 403 when
+   `CAMOFOX_ADMIN_KEY` is unset: shut Node down gracefully instead, then start Camofox again.
+4. Set `interactive.mode` to `off`, restart Camofox, and start a new Hermes browser task.
 
 ## Externally managed sessions
 
