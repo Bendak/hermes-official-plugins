@@ -94,6 +94,11 @@ When another app drives the visible Camofox browser, Hermes can work inside that
 
 Env vars take precedence over `config.yaml`.
 
+Adoption only reuses a tab whose `listItemId` equals the session key. With no such tab, the next
+`browser_navigate` opens a new tab under the session key in the same Camofox user (same cookies and
+profile). To make Hermes attach to the tab another app opened, set `session_key` to the key that app
+used when it created the tab.
+
 ## Configuration reference
 
 | Key | Default | Meaning |
