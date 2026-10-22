@@ -74,13 +74,37 @@ def _navigate_tab(task_id: Optional[str], browser_url: str) -> tuple[dict[str, A
     return client.ensure_tab(task_id, browser_url), {"ok": True, "url": browser_url}
 
 
+_TAB_GONE_ERROR = ("The browser tab is gone (the Camofox server reaped it or restarted). "
+                   "Call browser_navigate to open the page again.")
+
+
+def _tab_gone(exc: BaseException) -> bool:
+    return isinstance(exc, requests.HTTPError) and exc.response is not None and exc.response.status_code in (404, 410)
+
+
+def _run_on_tab(session: dict[str, Any], body: Callable[[dict[str, Any]], str]) -> str:
+    """``body(session)``; when the server says the cached tab is gone, resync once and retry."""
+    tracked = session["tab_id"]
+    try:
+        return body(session)
+    except requests.HTTPError as e:
+        if not _tab_gone(e):
+            raise
+        if not client.resync_tab(session):
+            return _fail(_TAB_GONE_ERROR)
+        if session["tab_id"] == tracked:  # the tab is alive: the 404 was about something else
+            raise
+        logger.info("Camofox tab %s was gone; continuing in live tab %s", tracked, session["tab_id"])
+        return body(session)
+
+
 def _with_tab(task_id: Optional[str], body: Callable[[dict[str, Any]], str]) -> str:
     """Run ``body(session)`` on the task's existing tab; no tab → the navigate-first error."""
     try:
         session = client.get_session(task_id)
         if not session["tab_id"]:
             return _fail(client.NO_SESSION_ERROR)
-        return body(session)
+        return _run_on_tab(session, body)
     except Exception as e:
         return _fail(str(e))
 
@@ -162,9 +186,12 @@ def browser_type(ref: str, text: str, task_id: Optional[str] = None) -> str:
         if not session["tab_id"]:
             return _fail(client.NO_SESSION_ERROR)
         clean_ref = ref.lstrip("@")
-        client.post(client.tab_path(session, "type"), {"userId": session["user_id"], "ref": clean_ref, "text": text})
-        response = {"success": True, "typed": policy.redact_text(text), "element": clean_ref}
-        return _dumps(policy.redact_typed_text(response, text))
+
+        def body(sess):
+            client.post(client.tab_path(sess, "type"), {"userId": sess["user_id"], "ref": clean_ref, "text": text})
+            return _dumps(policy.redact_typed_text(
+                {"success": True, "typed": policy.redact_text(text), "element": clean_ref}, text))
+        return policy.redact_typed_text(_run_on_tab(session, body), text)
     except Exception as e:
         return _fail(policy.redact_typed_text(str(e), text))
 
@@ -228,11 +255,13 @@ def _evaluate(expression: str, task_id: Optional[str]) -> str:
         session = client.get_session(task_id)
         if not session["tab_id"]:
             return _fail(client.NO_SESSION_ERROR)
-        resp = client.post(client.tab_path(session, "evaluate"),
-                           {"expression": expression, "userId": session["user_id"]})
-        parsed = _parse_eval_value(resp.get("result") if isinstance(resp, dict) else resp)
-        return _dumps({"success": True, "result": policy.redact_output(parsed),
-                       "result_type": type(parsed).__name__}, default=str)
+
+        def body(sess):
+            resp = client.post(client.tab_path(sess, "evaluate"), {"expression": expression, "userId": sess["user_id"]})
+            parsed = _parse_eval_value(resp.get("result") if isinstance(resp, dict) else resp)
+            return _dumps({"success": True, "result": policy.redact_output(parsed),
+                           "result_type": type(parsed).__name__}, default=str)
+        return _run_on_tab(session, body)
     except Exception as e:
         if any(code in str(e) for code in ("404", "405", "501")):  # a server without /evaluate
             return _dumps({"success": False, "error": _EVAL_UNSUPPORTED})
