@@ -39,7 +39,7 @@ def test_registers_the_browser_tools_in_the_camofox_toolset():
     assert set(ctx.tools) == EXPECTED_TOOLS
     assert {v["toolset"] for v in ctx.tools.values()} == {"camofox"}
     assert all(v["schema"]["name"] == name for name, v in ctx.tools.items())
-    assert set(ctx.hooks) == {"on_session_finalize"}
+    assert set(ctx.hooks) == {"on_session_end", "on_session_finalize"}
     assert ctx.aux["camofox_vision"]["inherit_from"] == "vision"
     assert "camofox" in ctx.cli
 
@@ -77,6 +77,15 @@ def test_handlers_take_args_positionally_and_task_id_by_keyword(camofox):
     out = json.loads(ctx.tools["browser_navigate"]["handler"]({"url": "https://example.com"}, task_id="h1"))
     assert out["success"] is True
     assert camofox.calls("POST", "/tabs")[0]["body"]["listItemId"] == "task_h1"
+
+
+def test_each_turn_end_closes_that_tasks_ephemeral_session(camofox):
+    """Core cleaned up after every turn; a cron or subagent task id differs from the session id."""
+    ctx = _Ctx()
+    camofox_plugin.register(ctx)
+    ctx.tools["browser_navigate"]["handler"]({"url": "https://example.com"}, task_id="cron:job:1")
+    ctx.hooks["on_session_end"](session_id="sess-1", task_id="cron:job:1", completed=True)
+    assert len(camofox.calls("DELETE")) == 1
 
 
 def test_session_finalize_closes_the_ephemeral_session(camofox):

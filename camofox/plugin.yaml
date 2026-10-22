@@ -25,6 +25,7 @@ provides_tools:
   - browser_console
   - browser_import_cookies
 provides_hooks:
+  - on_session_end
   - on_session_finalize
 requires_env:
   - name: CAMOFOX_URL
