@@ -13,9 +13,10 @@ agent one tool:
 | `elevenlabs_sound_effect` | Turns a text description into an audio file (0.5 to 30 seconds, optionally a seamless loop) |
 
 Ask for "the sound of a heavy wooden door creaking open in a stone hall", "a short retro coin pickup
-blip" or "90s hip-hop drum loop, 90 BPM, loopable" and Hermes generates it, saves it, and sends it
-back to you: as an audio attachment on Telegram, Discord, Slack and the other messaging platforms, in
-the chat in Hermes Desktop, and as a file path in the terminal.
+blip" or "90s hip-hop drum loop, 90 BPM, loopable" and Hermes generates it and saves it. The tool hands
+the agent a `MEDIA:` line for the file; when the agent puts it in its reply, the file is sent as an
+audio attachment on Telegram, Discord, Slack and the other messaging platforms and shows up in the chat
+in Hermes Desktop. In the terminal you get the file path.
 
 ## Install
 

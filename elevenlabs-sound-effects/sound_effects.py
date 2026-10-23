@@ -8,30 +8,42 @@ prompt_influence?, loop, model_id}`` and the ``xi-api-key`` header returns the a
 
 Model, format and endpoint are user settings (``plugins.entries.<id>.settings``), read per call so a
 multiplexed gateway serves each profile its own; the key comes from the profile's secret scope.
+Everything that could waste a billed call (bad input, a setting outside the declared choices, a
+malformed key) is refused before the request goes out.
 """
 
 from __future__ import annotations
 
 import datetime
+import json
+import math
 import re
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 from agent.secret_scope import get_secret
 from tools.registry import tool_error, tool_result
 
 API_KEY_ENV = "ELEVENLABS_API_KEY"
+SETTINGS_KEY = "plugins.entries.elevenlabs-sound-effects.settings"
+MODELS = ("eleven_text_to_sound_v2", "eleven_text_to_sound_v3")
+# output_format choices (plugin.yaml) → file extension; ElevenLabs' opus is Ogg Opus. Every
+# extension is on the gateway's deliverable-media list.
+FORMATS = {"mp3_44100_128": "mp3", "mp3_44100_192": "mp3", "opus_48000_128": "opus",
+           "opus_48000_192": "opus", "wav_44100": "wav", "wav_48000": "wav"}
 DEFAULTS = {
-    "sound_model": "eleven_text_to_sound_v2",
+    "sound_model": MODELS[0],
     "output_format": "mp3_44100_128",
     "api_base_url": "https://api.elevenlabs.io",
 }
 MIN_SECONDS, MAX_SECONDS = 0.5, 30.0
-_TIMEOUT_SECONDS = 180.0
-_MAX_AUDIO_BYTES = 50 * 1024 * 1024
-# Codec prefix of ``output_format`` → file extension (every one is on the gateway's media list).
-_EXTENSIONS = {"mp3": "mp3", "opus": "opus", "wav": "wav"}
+_CONNECT_READ_TIMEOUT = 60.0
+_DEADLINE_SECONDS = 180.0
+# 30 s of 48 kHz WAV is ~6 MB; the cap only stops a misbehaving endpoint from filling memory.
+MAX_AUDIO_BYTES = 50 * 1024 * 1024
 
 SCHEMA = {
     "name": "elevenlabs_sound_effect",
@@ -74,18 +86,25 @@ def _number(args: dict, key: str, low: float, high: float) -> float | None:
     if raw is None or raw == "":
         return None
     try:
+        if isinstance(raw, bool):
+            raise TypeError
         value = float(raw)
     except (TypeError, ValueError):
         raise ValueError(f"{key} must be a number between {low:g} and {high:g}") from None
-    if not low <= value <= high:
-        raise ValueError(f"{key} must be between {low:g} and {high:g} (got {value:g})")
+    if not (math.isfinite(value) and low <= value <= high):
+        raise ValueError(f"{key} must be between {low:g} and {high:g} (got {raw!r})")
     return value
 
 
-def _flag(raw: Any) -> bool:
-    if isinstance(raw, str):
-        return raw.strip().lower() in {"1", "true", "yes", "on"}
-    return bool(raw)
+def _flag(raw: Any, key: str) -> bool:
+    if raw is None or isinstance(raw, bool):
+        return bool(raw)
+    cleaned = raw.strip().lower() if isinstance(raw, str) else None
+    if cleaned in {"true", "1", "yes", "on"}:
+        return True
+    if cleaned in {"false", "0", "no", "off", ""}:
+        return False
+    raise ValueError(f"{key} must be true or false (got {raw!r})")
 
 
 def build_request(args: dict, model: str) -> dict:
@@ -93,7 +112,7 @@ def build_request(args: dict, model: str) -> dict:
     prompt = str(args.get("prompt") or "").strip()
     if not prompt:
         raise ValueError("prompt is required: describe the sound effect to generate")
-    body: dict[str, Any] = {"text": prompt, "loop": _flag(args.get("loop")), "model_id": model}
+    body: dict[str, Any] = {"text": prompt, "loop": _flag(args.get("loop"), "loop"), "model_id": model}
     duration = _number(args, "duration_seconds", MIN_SECONDS, MAX_SECONDS)
     if duration is not None:
         body["duration_seconds"] = duration
@@ -103,11 +122,35 @@ def build_request(args: dict, model: str) -> dict:
     return body
 
 
-def _api_error(response) -> str:
+def read_settings(settings: Callable[[str], Any]) -> tuple[str, str, str]:
+    """``(model, output_format, base_url)``. A value outside the declared choices (possible through a
+    hand-edited config.yaml) is refused: ElevenLabs would bill for audio that is then rejected or
+    saved under the wrong extension."""
+    model = settings("sound_model") or DEFAULTS["sound_model"]
+    output_format = settings("output_format") or DEFAULTS["output_format"]
+    base_url = str(settings("api_base_url") or DEFAULTS["api_base_url"]).strip().rstrip("/")
+    if model not in MODELS:
+        raise ValueError(f"{SETTINGS_KEY}.sound_model is {model!r}; use one of {', '.join(MODELS)}")
+    if output_format not in FORMATS:
+        raise ValueError(f"{SETTINGS_KEY}.output_format is {output_format!r}; use one of {', '.join(FORMATS)}")
+    parts = urlsplit(base_url)
+    if parts.scheme not in ("https", "http") or not parts.hostname:
+        raise ValueError(f"{SETTINGS_KEY}.api_base_url must be an http(s) URL")
+    return model, output_format, base_url
+
+
+def _display_url(url: str) -> str:
+    """``url`` without userinfo, for error text."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    return urlunsplit(parts._replace(netloc=f"{host}:{parts.port}" if parts.port else host))
+
+
+def _api_error(status: int, body: bytes, reason: str) -> str:
     """ElevenLabs errors come as ``{"detail": {"status", "message"}}`` or FastAPI's
     ``{"detail": [{"loc", "msg"}]}``; fall back to the raw body."""
     try:
-        payload = response.json()
+        payload = json.loads(body)
     except ValueError:
         payload = None
     detail = payload.get("detail") if isinstance(payload, dict) else None
@@ -118,10 +161,33 @@ def _api_error(response) -> str:
             f"{'.'.join(str(p) for p in item.get('loc', [])[1:]) or 'request'}: {item.get('msg')}"
             for item in detail if isinstance(item, dict)) or str(detail)
     else:
-        message = (response.text or "").strip()[:500] or response.reason_phrase
+        message = body.decode("utf-8", "replace").strip()[:500] or reason
     hint = {401: " (check ELEVENLABS_API_KEY and your plan's remaining credits)",
-            429: " (rate limited or out of credits; try again later)"}.get(response.status_code, "")
-    return f"ElevenLabs returned HTTP {response.status_code}: {message}{hint}"
+            429: " (rate limited or out of credits; try again later)"}.get(status, "")
+    return f"ElevenLabs returned HTTP {status}: {message}{hint}"
+
+
+def _download(base_url: str, output_format: str, body: dict, api_key: str):
+    """Stream the response under a byte cap and an overall deadline; returns
+    ``(status, body bytes, reason, headers)``. Raises ``ValueError`` for an oversize or overdue body."""
+    import httpx
+
+    deadline = time.monotonic() + _DEADLINE_SECONDS
+    with httpx.stream(
+            "POST", f"{base_url}/v1/sound-generation", params={"output_format": output_format}, json=body,
+            headers={"xi-api-key": api_key, "accept": "audio/*"}, timeout=_CONNECT_READ_TIMEOUT) as response:
+        declared = response.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > MAX_AUDIO_BYTES:
+            raise ValueError(f"response of {declared} bytes is over the {MAX_AUDIO_BYTES} byte cap")
+        chunks, size = [], 0
+        for chunk in response.iter_bytes():
+            size += len(chunk)
+            if size > MAX_AUDIO_BYTES:
+                raise ValueError(f"response is over the {MAX_AUDIO_BYTES} byte cap")
+            if time.monotonic() > deadline:
+                raise ValueError(f"response took longer than {_DEADLINE_SECONDS:g} seconds")
+            chunks.append(chunk)
+        return response.status_code, b"".join(chunks), response.reason_phrase, response.headers
 
 
 def _slug(text: str) -> str:
@@ -133,11 +199,10 @@ def _save(audio: bytes, prompt: str, output_format: str) -> str:
     inside the roots it delivers ``MEDIA:`` files from. Resolved per call (multiplexed profiles)."""
     from hermes_constants import get_hermes_home
 
-    extension = _EXTENSIONS.get(output_format.split("_", 1)[0], "mp3")
     directory = get_hermes_home() / "cache" / "generated" / "audio"
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = directory / f"sfx_{_slug(prompt)}_{stamp}_{uuid.uuid4().hex[:8]}.{extension}"
+    path = directory / f"sfx_{_slug(prompt)}_{stamp}_{uuid.uuid4().hex[:8]}.{FORMATS[output_format]}"
     path.write_bytes(audio)
     return str(path)
 
@@ -149,32 +214,29 @@ def generate(args: dict, settings: Callable[[str], Any]) -> str:
     if not api_key:
         return tool_error(f"{API_KEY_ENV} is not set. Add your ElevenLabs API key with "
                           f"`hermes config set {API_KEY_ENV} <key>` or in Settings → Plugins.")
-    model = settings("sound_model") or DEFAULTS["sound_model"]
-    output_format = settings("output_format") or DEFAULTS["output_format"]
-    base_url = str(settings("api_base_url") or DEFAULTS["api_base_url"]).rstrip("/")
+    if not api_key.isprintable():
+        return tool_error(f"{API_KEY_ENV} contains control characters; re-enter the key.")
     try:
+        model, output_format, base_url = read_settings(settings)
         body = build_request(args, model)
     except ValueError as exc:
         return tool_error(str(exc))
     try:
-        response = httpx.post(
-            f"{base_url}/v1/sound-generation", params={"output_format": output_format}, json=body,
-            headers={"xi-api-key": api_key, "accept": "audio/*"}, timeout=_TIMEOUT_SECONDS)
-    except httpx.HTTPError as exc:
-        return tool_error(f"Could not reach ElevenLabs at {base_url}: {type(exc).__name__}: {exc}")
-    if response.status_code != 200:
-        return tool_error(_api_error(response))
-    audio = response.content
+        status, audio, reason, headers = _download(base_url, output_format, body, api_key)
+    except ValueError as exc:
+        return tool_error(f"ElevenLabs at {_display_url(base_url)}: {exc}")
+    except httpx.HTTPError as exc:  # exception text can echo request headers: name the class only
+        return tool_error(f"Could not reach ElevenLabs at {_display_url(base_url)}: {type(exc).__name__}")
+    if status != 200:
+        return tool_error(_api_error(status, audio, reason))
     if not audio:
         return tool_error("ElevenLabs returned an empty audio response")
-    if len(audio) > _MAX_AUDIO_BYTES:
-        return tool_error(f"ElevenLabs returned {len(audio)} bytes, over the {_MAX_AUDIO_BYTES} byte cap")
     path = _save(audio, body["text"], output_format)
     result = {
         "success": True, "file_path": path, "media_tag": f"MEDIA:{path}",
         "model": model, "output_format": output_format, "loop": body["loop"],
         "duration_seconds": body.get("duration_seconds"), "bytes": len(audio),
     }
-    if cost := response.headers.get("character-cost"):
+    if cost := headers.get("character-cost"):
         result["billed_characters"] = cost
     return tool_result(result)
