@@ -375,7 +375,8 @@ def _netscape_parse(text: str) -> list[dict[str, Any]]:
 def _cookies_dir() -> str:
     """``browser.camofox.cookies_dir`` with ``~`` expanded (default ``~/.camofox/cookies``)."""
     raw = str(client.get_camofox_config().get("cookies_dir") or "").strip()
-    return os.path.expanduser(raw or "~/.camofox/cookies")
+    # normpath: on Windows expanduser("~/.camofox/cookies") keeps the "/" after the home dir.
+    return os.path.normpath(os.path.expanduser(raw or "~/.camofox/cookies"))
 
 
 def _read_cookie_file(cookies_path: str, domain_suffix: Optional[str] = None) -> list[dict[str, Any]]:
