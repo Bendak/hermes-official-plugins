@@ -166,9 +166,11 @@ def cmd_process(args) -> dict:
             "applied": {"trim_silence": args.trim, "loudness_lufs": args.loudness, "fade_ms": args.fade_ms}}
 
 
-def _pcm_frames(ffmpeg: str, src: Path, channels: int, rate: int) -> array.array:
+def _pcm_frames(ffmpeg: str, src: Path, channels: int, rate: int, *, whole: bool = False) -> array.array:
     proc = _run([ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(src), "-vn",
                  "-ac", str(channels), "-ar", str(rate), "-f", "s16le", "-acodec", "pcm_s16le", "-"])
+    if whole and len(proc.stdout) > _MAX_PCM_BYTES:
+        raise Failure("bad_input", f"{src.name} is too long to process as one loop (over {_MAX_PCM_BYTES // 2**20} MiB of audio)")
     raw = proc.stdout[:_MAX_PCM_BYTES]
     samples = array.array("h")
     samples.frombytes(raw[: len(raw) - len(raw) % (2 * channels)])
@@ -189,18 +191,30 @@ def cmd_loopfix(args) -> dict:
     channels, rate = int(before["channels"] or 2), int(before["sample_rate"] or 48000)
     if out.suffix.lower() == ".opus":
         rate = 48000
-    samples = _pcm_frames(ffmpeg, src, channels, rate)
+    samples = _pcm_frames(ffmpeg, src, channels, rate, whole=True)
     frames = len(samples) // channels
     n = int(rate * args.crossfade_ms / 1000)
     if frames < 3 * n:
         raise Failure("bad_input", f"{src.name} is too short for a {args.crossfade_ms:g} ms crossfade")
     keep = frames - n
+    head = samples[: n * channels]
+    tail = samples[keep * channels: (keep + n) * channels]
+    # Equal-power fades sum to sqrt(2) on correlated material (a hum, a tone): normalise the gain by the
+    # segments' correlation so the seam neither bumps nor dips, whatever the material.
+    dot = sum(a * b for a, b in zip(head, tail))
+    norm = math.sqrt(sum(a * a for a in head) * sum(b * b for b in tail)) or 1.0
+    r = max(-1.0, min(1.0, dot / norm))
     blended = array.array("h", samples[: keep * channels])
+    clipped = 0
     for i in range(n):
         t = (i + 0.5) / n
         fade_in, fade_out = math.sin(t * math.pi / 2), math.cos(t * math.pi / 2)
+        # Capped: anti-correlated segments cancel, and boosting what is left would only add noise.
+        gain = min(1.5, 1 / math.sqrt(max(1e-6, fade_in ** 2 + fade_out ** 2 + 2 * r * fade_in * fade_out)))
         for c in range(channels):
-            v = samples[i * channels + c] * fade_in + samples[(keep + i) * channels + c] * fade_out
+            v = (head[i * channels + c] * fade_in + tail[i * channels + c] * fade_out) * gain
+            if not -32768 <= v <= 32767:
+                clipped += 1
             blended[i * channels + c] = max(-32768, min(32767, int(round(v))))
     if sys.byteorder == "big":
         blended.byteswap()
@@ -220,7 +234,8 @@ def cmd_loopfix(args) -> dict:
                 os.unlink(tmp)
     finally:
         os.unlink(raw_path)
-    return {"ok": True, "input": before, "output": probe(out, ffprobe), "crossfade_ms": args.crossfade_ms}
+    return {"ok": True, "input": before, "output": probe(out, ffprobe), "crossfade_ms": args.crossfade_ms,
+            "seam_correlation": round(r, 3), "clipped_samples": clipped}
 
 
 def cmd_loopcheck(args) -> dict:
@@ -239,12 +254,13 @@ def cmd_loopcheck(args) -> dict:
 
     head, tail = rms(samples[:edge]), rms(samples[-edge:])
     level_db = 20 * math.log10(max(head, 1e-6) / max(tail, 1e-6))
-    overall = rms(samples)
-    # A fade to silence at the seam is a dropout on every repeat even though the edge samples match:
-    # look at the 1 ms either side of the seam together.
+    # A fade to silence at the seam is a dropout on every repeat even though the edge samples match.
+    # Compare the 1 ms either side of the seam with the 20 ms around it, not with the whole file: a loop
+    # cut inside a rest (footsteps, a drum loop with space) is quiet on both scales and is fine.
     ms = _LOOP_RATE // 1000
     seam_level = rms(samples[-ms:].tolist() + samples[:ms].tolist())
-    gap = overall > 0.01 and seam_level < overall * 0.2
+    around = rms(samples[-21 * ms:-ms].tolist() + samples[ms:21 * ms].tolist())
+    gap = around > 0.01 and seam_level < around * 0.1
     click = seam > max(2 * typical, 0.02) or abs(level_db) > 6
     verdict = "gap" if gap else "click" if click else "seamless"
     result = {"ok": True, "file": str(src), "verdict": verdict,
@@ -284,7 +300,12 @@ def cmd_pack(args) -> dict:
         raise Failure("bad_args", f"{folder} or {zip_path} exists; pass --force to replace them")
     # Build in a fresh staging folder and swap it in by rename: a re-pack never keeps files from an
     # earlier pack, and never writes through a symlink left in the old folder or at the zip path.
+    if zip_path.is_dir() and not zip_path.is_symlink():
+        raise Failure("bad_args", f"{zip_path} is a folder; move it away first")
+    umask = os.umask(0)
+    os.umask(umask)
     staging = Path(tempfile.mkdtemp(prefix=f".{name}.staging-", dir=out_dir))
+    tmp_zip = None
     try:
         entries = _fill_pack(staging, sources, prompts, args, ffmpeg, ffprobe)
         manifest = {"name": args.name, "sounds": entries}
@@ -295,17 +316,29 @@ def cmd_pack(args) -> dict:
         with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as archive:
             for path in sorted(staging.iterdir()):
                 archive.write(path, f"{name}/{path.name}")
-        os.replace(tmp_zip, zip_path)  # replaces a symlink itself, never its target
+        os.chmod(staging, 0o777 & ~umask)  # mkdtemp/mkstemp are private; a delivered pack follows the umask
+        os.chmod(tmp_zip, 0o666 & ~umask)
+        # Folder first, then the zip: if the old folder can't be moved (a file in it is open), nothing changed.
+        old = None
         if folder.is_symlink() or folder.is_file():
             folder.unlink()
         elif folder.exists():
             old = Path(tempfile.mkdtemp(prefix=f".{name}.old-", dir=out_dir))
-            os.replace(folder, old / name)
-            shutil.rmtree(old)  # rmtree removes links inside, never what they point to
+            try:
+                os.replace(folder, old / name)
+            except OSError as exc:
+                shutil.rmtree(old, ignore_errors=True)
+                raise Failure("bad_input", f"could not replace {folder} (is a file in it open?): {exc.strerror or exc}") from None
         os.replace(staging, folder)
+        os.replace(tmp_zip, zip_path)  # replaces a symlink itself, never its target
+        tmp_zip = None
+        if old is not None:
+            shutil.rmtree(old, ignore_errors=True)  # never follows links out; a locked leftover is only hidden clutter
     finally:
         if staging.exists():
-            shutil.rmtree(staging)
+            shutil.rmtree(staging, ignore_errors=True)
+        if tmp_zip and os.path.exists(tmp_zip):
+            os.unlink(tmp_zip)
     return {"ok": True, "folder": str(folder), "zip": str(zip_path), "count": len(entries),
             "manifest": str(folder / "manifest.json"), "sounds": entries}
 

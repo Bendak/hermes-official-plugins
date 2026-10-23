@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import shutil
 import struct
 import subprocess
@@ -104,11 +105,37 @@ def test_loopfix_removes_the_click_and_fades_are_reported_as_a_gap(tmp_path):
     fixed = tmp_path / "fixed.wav"
     code, out = run("loopfix", str(clicky), "--out", str(fixed), "--crossfade-ms", "20")
     assert code == 0 and abs(out["output"]["duration_seconds"] - (out["input"]["duration_seconds"] - 0.02)) < 0.002
+    assert out["clipped_samples"] == 0
     assert run("loopcheck", str(fixed))[1]["verdict"] == "seamless"
     faded = tmp_path / "faded.wav"
     assert run("process", str(clicky), "--out", str(faded), "--fade-ms", "8")[0] == 0
     assert run("loopcheck", str(faded))[1]["verdict"] == "gap"
     assert run("process", str(clicky), "--out", str(tmp_path / "x.opus"), "--loudness", "-16")[0] == 0  # 48 kHz forced
+    # A loud tonal loop keeps its level through the seam (no equal-power bump into clipping).
+    hot = tmp_path / "hot.wav"
+    with wave.open(str(hot), "wb") as out_wav:
+        out_wav.setnchannels(1)
+        out_wav.setsampwidth(2)
+        out_wav.setframerate(48000)
+        out_wav.writeframes(b"".join(struct.pack("<h", int(30000 * math.sin(2 * math.pi * 480 * i / 48000)))
+                                     for i in range(48000 + 25)))
+    assert run("loopfix", str(hot), "--out", str(tmp_path / "hotfix.wav"))[1]["clipped_samples"] == 0
+
+
+@needs_ffmpeg
+def test_a_loop_cut_inside_a_rest_is_not_a_gap(tmp_path):
+    rate, frames = 48000, []
+    for i in range(rate):  # four short tone bursts per second with silence around each
+        phase = i % (rate // 4)
+        frames.append(int(14000 * math.sin(2 * math.pi * 700 * i / rate) * math.exp(-phase / 1500))
+                      if 4000 < phase < 9000 else 0)
+    beats = tmp_path / "beats.wav"
+    with wave.open(str(beats), "wb") as out_wav:
+        out_wav.setnchannels(1)
+        out_wav.setsampwidth(2)
+        out_wav.setframerate(rate)
+        out_wav.writeframes(b"".join(struct.pack("<h", v) for v in frames))
+    assert run("loopcheck", str(beats))[1]["verdict"] == "seamless"
 
 
 @needs_ffmpeg
@@ -144,3 +171,8 @@ def test_pack_writes_folder_manifest_and_zip(tmp_path):
     with zipfile.ZipFile(out_dir / "ui-pack.zip") as archive:
         assert sorted(archive.namelist()) == ["ui-pack/01-door.wav", "ui-pack/manifest.json"]
     assert not [p for p in out_dir.iterdir() if p.name.startswith(".")]  # no staging leftovers
+    if os.name == "posix":  # the delivered pack follows the umask, not mkdtemp's private 0700
+        umask = os.umask(0)
+        os.umask(umask)
+        assert (out_dir / "ui-pack").stat().st_mode & 0o777 == 0o777 & ~umask
+        assert (out_dir / "ui-pack.zip").stat().st_mode & 0o777 == 0o666 & ~umask

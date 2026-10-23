@@ -87,7 +87,10 @@ def sounds(limit: int = Query(500, ge=1, le=5000)) -> dict:
             bucket["bytes"] += row["size"] or 0
         else:
             bucket["missing"] += 1
-    return {**_host(), "sounds": rows[:limit], "total": len(rows), "totals": totals}
+    # `total` is every record in the file; `readable` the newest ones this response covers (per-format
+    # totals, search and filters run over those).
+    return {**_host(), "sounds": rows[:limit], "readable": len(rows), "total": max(len(rows), _prov.count()),
+            "totals": totals}
 
 
 def _record(sound_id: str) -> dict:

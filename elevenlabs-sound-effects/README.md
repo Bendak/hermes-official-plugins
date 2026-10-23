@@ -15,7 +15,9 @@ agent one tool:
 Ask for "the sound of a heavy wooden door creaking open in a stone hall", "a short retro coin pickup
 blip" or "90s hip-hop drum loop, 90 BPM, loopable" and Hermes generates it and saves it. The tool hands
 the agent a `MEDIA:` line for the file; when the agent puts it in its reply, the file is sent as an
-audio attachment on Telegram, Discord, Slack and the other messaging platforms. In Hermes Desktop the
+attachment on Telegram, Discord, Slack and the other messaging platforms. MP3 (the default format)
+plays inline on most chat apps; Ogg Opus and WAV can arrive as plain files (Telegram shows them that
+way). In Hermes Desktop the
 sound appears as an inline card (below). In the terminal you get the file path.
 
 The plugin also ships:
@@ -45,19 +47,20 @@ The only Python dependency is `httpx`, which Hermes already ships.
 
 ## Settings
 
-In Hermes Desktop: **Settings → Plugins → ElevenLabs Sound Effects**. Everywhere else, with
-`hermes config set`:
+In Hermes Desktop: **Capabilities → Plugins**, then the gear icon on the plugin (the settings page is
+titled with the package name, `elevenlabs-sound-effects`). Everywhere else, with `hermes config set`:
 
 | Setting | Default | What it does |
 |---|---|---|
 | `api_key` | (unset) | Your ElevenLabs API key, stored in `.env` as `ELEVENLABS_API_KEY`: `hermes config set ELEVENLABS_API_KEY <key>` |
 | `sound_model` | `eleven_text_to_sound_v2` | `eleven_text_to_sound_v2` or `eleven_text_to_sound_v3`: `hermes config set plugins.entries.elevenlabs-sound-effects.settings.sound_model eleven_text_to_sound_v3` |
-| `output_format` | `mp3_44100_128` | `mp3_44100_128`, `mp3_44100_192`, `opus_48000_128`, `opus_48000_192`, `wav_44100`, `wav_48000`: `hermes config set plugins.entries.elevenlabs-sound-effects.settings.output_format wav_48000`. 192 kbps MP3 needs the ElevenLabs Creator plan or above; 44.1 kHz WAV needs Pro or above. |
+| `output_format` | `mp3_44100_128` | `mp3_44100_128`, `mp3_44100_192`, `opus_48000_128`, `opus_48000_192`, `wav_44100`, `wav_48000`: `hermes config set plugins.entries.elevenlabs-sound-effects.settings.output_format wav_48000`. ElevenLabs documents 192 kbps MP3 for its Creator plan and above and 44.1 kHz WAV for Pro and above; if your plan refuses a format, the tool reports ElevenLabs' error. |
 | `api_base_url` | `https://api.elevenlabs.io` | Change only for an ElevenLabs data-residency endpoint, e.g. `https://api.eu.residency.elevenlabs.io` |
 
-The agent chooses the per-sound parameters itself: the description, the length (`duration_seconds`,
-0.5 to 30; omit it and ElevenLabs picks one from the prompt), `loop`, and `prompt_influence` (0 to
-1; higher follows the prompt more literally, lower varies more).
+The agent chooses the per-sound parameters itself: the description (at most 450 characters; longer
+prompts are refused before anything is sent), the length (`duration_seconds`, 0.5 to 30; omit it and
+ElevenLabs picks one), `loop`, and `prompt_influence` (0 to 1; higher follows the prompt more
+literally, lower varies more).
 
 The tool also takes an optional `model` per call (`eleven_text_to_sound_v2` or
 `eleven_text_to_sound_v3`); without it the `sound_model` setting applies.
@@ -75,8 +78,9 @@ The Desktop library reads it. Nothing in it leaves your machine.
 
 ## Hermes Desktop
 
-Turn the plugin's Desktop half on in **Settings → Plugins → ElevenLabs Sound Effects** (Desktop halves
-are opt-in).
+The Desktop half is opt-in, also after `hermes plugins install` from the CLI (which turns on only the
+agent half): open **Capabilities → Plugins**, switch to the list view, and turn on
+**Desktop: ElevenLabs Sound Effects** on the plugin's row.
 
 **Sound card.** On Desktop the bundled skill ends each generation with `::elevenlabs-sfx{id="<sound_id>"}`.
 The card shows the prompt, length, loop, model, format and credits billed, a waveform you can click
@@ -97,15 +101,18 @@ and **Open chat** (the conversation that made it). It reloads when a sound is ge
 switch profile or connection, and when you save the plugin's settings; it never polls.
 
 **Remote Hermes.** When Desktop is connected to Hermes on another machine, the files stay on that
-machine. Playback and downloads stream through Hermes, so they work the same; Reveal is replaced by a
-note saying which host holds the file. Format conversion needs ffmpeg on that host; without it only
+machine. Playback and downloads stream through Hermes, so they work the same. On a registered remote
+connection Reveal is replaced by a note saying which host holds the file; where Desktop can't tell
+(a per-profile remote override) the library names the host the backend reports and Reveal explains
+when the file is not on this computer. Format conversion needs ffmpeg on that host; without it only
 the original format is offered and the menu says why. Sounds made before version 1.1.0 have no record
 and don't appear in the library.
 
 ## Cost and privacy
 
 Every call is a paid ElevenLabs generation billed to your account: ElevenLabs charges per second of
-audio when a duration is set and a flat amount per generation otherwise (see their
+audio when a duration is set (about 10 credits per second, as billed to us) and a flat amount per
+generation otherwise (about 50 credits, for 2 s and 3 s automatic clips alike; see their
 [pricing](https://elevenlabs.io/pricing/api)). The tool reports the `character-cost` header
 ElevenLabs returns as `billed_characters`. Desktop format conversions and the processing script run
 locally and cost nothing. What leaves your machine: the sound description and the

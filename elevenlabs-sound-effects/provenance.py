@@ -26,6 +26,7 @@ SOUND_ID_RE = re.compile(r"[0-9a-f]{12}")
 AUDIO_NAME_RE = re.compile(r"sfx_[a-z0-9-]{1,40}_\d{8}_\d{6}_[0-9a-f]{8,12}\.(?:mp3|opus|wav)")
 # Read at most the newest ~2 MB (several thousand records); older lines stay on disk untouched.
 _TAIL_BYTES = 2 * 1024 * 1024
+_LOCK_OFFSET = 0x7FFFFFFF
 _FIELDS = ("id", "created_at", "prompt", "duration_seconds", "loop", "prompt_influence", "model",
            "output_format", "file_name", "bytes", "billed_characters", "session_id")
 
@@ -57,13 +58,15 @@ def record(entry: dict[str, Any]) -> None:
         try:
             if os.name == "nt":  # pragma: no cover - Windows emulates O_APPEND with seek+write: lock it
                 import msvcrt
-                os.lseek(fd, 0, os.SEEK_SET)
+                # Windows byte locks are mandatory: lock a sentinel byte far past any real end of file so
+                # readers of the records never hit it, only other writers taking the same lock.
+                os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
                 msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
                 try:
                     os.lseek(fd, 0, os.SEEK_END)
                     os.write(fd, line.encode("utf-8"))
                 finally:
-                    os.lseek(fd, 0, os.SEEK_SET)
+                    os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
                     msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
             else:
                 os.write(fd, line.encode("utf-8"))
@@ -101,6 +104,15 @@ def read_all() -> list[dict[str, Any]]:
         seen.add(sound_id)
         rows.append({key: row.get(key) for key in _FIELDS})
     return rows
+
+
+def count() -> int:
+    """How many records the file holds (lines), including any older than the read window."""
+    try:
+        with open(data_dir() / FILE_NAME, "rb") as handle:
+            return sum(chunk.count(b"\n") for chunk in iter(lambda: handle.read(1 << 20), b""))
+    except (OSError, ImportError, RuntimeError, ValueError):
+        return 0
 
 
 def find(sound_id: str) -> dict[str, Any] | None:

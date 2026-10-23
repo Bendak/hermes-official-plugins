@@ -226,6 +226,8 @@ def test_a_record_file_bigger_than_the_read_window_keeps_whole_records(api, monk
     assert len(prov.read_all()) == 30
     monkeypatch.setattr(prov, "_TAIL_BYTES", size - 10)  # mid-record start: that partial line is skipped
     assert len(prov.read_all()) == 29
+    listing = client.get("/sounds").json()
+    assert listing["readable"] == 29 and listing["total"] == 30  # the count covers records past the window
 
 
 def test_the_bundled_skill_is_registered(loaded):

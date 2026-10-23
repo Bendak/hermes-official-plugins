@@ -34,8 +34,8 @@ surface. Every generation is billed to the user's ElevenLabs account; local proc
 
 | Argument | Values | Notes |
 |---|---|---|
-| `prompt` | text | Required. What the sound is. |
-| `duration_seconds` | 0.5-30 | Omit to let ElevenLabs choose. Set it for anything that must fit a slot (UI blip, cut). |
+| `prompt` | text, at most 450 characters | Required. What the sound is. The tool refuses longer prompts before any request. |
+| `duration_seconds` | 0.5-30 | Omit to let ElevenLabs choose (billed a flat ~50 credits). Set it for anything that must fit a slot (UI blip, cut); billed ~10 credits per second. When the user names a length, pass it here, not in the prompt. |
 | `loop` | true/false | Seamless loop (ambience, beds, engine hums). |
 | `prompt_influence` | 0-1 (default 0.3) | Higher = more literal, lower = more varied. |
 | `model` | `eleven_text_to_sound_v2`, `eleven_text_to_sound_v3` | Omit to use the user's setting. |
@@ -64,11 +64,15 @@ Keep one sound per call. For a set, make one call per sound with a consistent st
 
 - Set `loop: true` and a `duration_seconds` long enough to avoid obvious repetition (6-20 s for
   ambience, a whole number of bars for music: at 90 BPM one 4/4 bar is 2.667 s).
+- `loopfix` shortens the loop by its crossfade. For music that must stay on a tempo grid, request
+  `duration_seconds` = bar length + crossfade (e.g. 2.687 s for one 90 BPM bar and a 20 ms crossfade)
+  so the fixed loop lands exactly on the bar.
 - Verify the seam before calling it seamless: run `loopcheck` (below) on the file you deliver and report
   its verdict (`seamless`, `click` or `gap`).
 - A loop flagged `click`: run `loopfix` (crossfades the end into the start, 20 ms by default), then
   `loopcheck` the result; or regenerate. Never "fix" a loop with `process --fade-ms`: fades dip to
-  silence at every repeat (`loopcheck` reports that as `gap`).
+  silence at every repeat (`loopcheck` reports that as `gap`). A `gap` on a sound that was not faded
+  means the generated audio itself drops out at the seam: run `loopfix`, or regenerate.
 - Never pass `--trim` or `--fade-ms` to `process` for a loop; plain conversion keeps the edges.
 - Lossy OGG/MP3 can add a small edge artifact a WAV does not have: if the converted file checks
   `click` while the WAV is `seamless`, deliver the WAV.
@@ -80,7 +84,7 @@ Keep one sound per call. For a set, make one call per sound with a consistent st
 | Godot, Unity, Unreal, web games | OGG (Vorbis) for music/ambience loops, WAV for short one-shots | engines import both; OGG keeps loops small, WAV avoids decode cost and MP3 padding on one-shots |
 | Video editing (Premiere, Resolve, Final Cut) | WAV 48 kHz | the video standard; no generation loss |
 | App/UI sounds | WAV (or OGG on Android/web) | short, sample-accurate start |
-| Chat (Telegram, Discord, Slack, WhatsApp) | MP3 or the original | small, plays inline |
+| Chat (Telegram, Discord, Slack, WhatsApp) | MP3 | plays inline on most chat apps; Ogg Opus and WAV may arrive as plain file attachments (Telegram does this) |
 
 MP3 adds a short silence at the start (encoder padding), so never use MP3 for gapless loops in an
 engine; convert loops to OGG or WAV.
@@ -93,19 +97,20 @@ line, never guess. Codes: `ffmpeg_missing`, `bad_input`, `bad_args`, `ffmpeg_fai
 Run it with `terminal`:
 
 ```
-python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py probe IN
-python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py process IN --out OUT.ogg [--trim] [--loudness -16] [--fade-ms 10]
-python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py loopfix IN --out OUT.wav [--crossfade-ms 20]
-python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py loopcheck IN
-python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py pack --name NAME --out-dir DIR FILE [FILE ...] [--format ogg|wav|mp3] [--prompts prompts.json]
+python3 "${HERMES_SKILL_DIR}/scripts/sfx_tool.py" probe IN
+python3 "${HERMES_SKILL_DIR}/scripts/sfx_tool.py" process IN --out OUT.ogg [--trim] [--loudness -16] [--fade-ms 10]
+python3 "${HERMES_SKILL_DIR}/scripts/sfx_tool.py" loopfix IN --out OUT.wav [--crossfade-ms 20]
+python3 "${HERMES_SKILL_DIR}/scripts/sfx_tool.py" loopcheck IN
+python3 "${HERMES_SKILL_DIR}/scripts/sfx_tool.py" pack --name NAME --out-dir DIR FILE [FILE ...] [--format ogg|wav|mp3] [--prompts prompts.json]
 ```
 
 - `process`: converts to the format implied by `OUT`'s extension (`.ogg` Vorbis, `.wav` 16-bit PCM,
   `.mp3`, `.opus`). Options for one-shots: `--trim` removes leading/trailing silence, `--loudness`
   normalises to that many LUFS (EBU R128; -16 for chat/web, -23 for broadcast video, -14 to -18 for
   games), `--fade-ms` adds in/out fades. Without options it only converts. It never overwrites its input.
-- `loopfix`: equal-power crossfade of the loop's last N ms into its first N ms; the result is N ms
-  shorter and repeats without a click or a dip.
+- `loopfix`: crossfade of the loop's last N ms into its first N ms, gain-matched to how alike the two
+  segments are; the result is N ms shorter and repeats without a click or a dip. Its JSON reports
+  `clipped_samples` (should be 0).
 - `loopcheck`: verdict `seamless`, `click` (the last and first samples jump) or `gap` (the seam fades
   to near-silence). Report the verdict as measured.
 - `pack`: copies (and converts with `--format`) the files into `DIR/NAME/` with tidy names, writes
@@ -118,24 +123,26 @@ python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py pack --name NAME --out-dir DIR F
 1. Settle the brief before spending: what the sound is, where it goes (engine, video, UI, chat), and
    the length. Ask only for what you can't infer. Completion: you can fill `prompt`, `duration_seconds`
    and `loop`.
-2. State the cost before a set or a long sound: ElevenLabs bills per generated second when
-   `duration_seconds` is set (the tool's `billed_characters` reports the real charge; read it from the
-   first result and use it for the rest of a set). Completion: the user knows the size of the spend.
+2. State the cost before a set or a long sound: with `duration_seconds` set ElevenLabs bills per
+   generated second (~10 credits/s measured); without it a flat amount per sound (~50 credits measured).
+   The tool's `billed_characters` reports the real charge: read it from the first result and use it for
+   the rest of a set. Completion: the user knows the size of the spend.
 3. Call `elevenlabs_sound_effect`. For variations, call it again with the same prompt (and a lower
    `prompt_influence` for more variety). Completion: each call returned `success` and a `sound_id`.
 4. Post-process only when the destination needs it (format, loudness, trimming, a loop check).
    Completion: the script printed `"ok": true` for every file, or you report its error line.
 5. Deliver by surface:
    - Hermes Desktop: one line of text, then the result's `desktop_card` line on its own paragraph:
-     `::elevenlabs-sfx{id="<sound_id>"}`. The card plays, loops and downloads the sound. Do not add a
-     MEDIA: line on Desktop (the card already shows the file).
+     `::elevenlabs-sfx{id="<sound_id>"}`. The card plays, loops and downloads the generated sound, so
+     do not add a MEDIA: line for it. Files you made from it (a `loopfix` result, a conversion, a pack
+     zip) are not in the card: give each on its own `MEDIA:<abs path>` line, and say which one to use.
    - Messaging (Telegram, Discord, Slack, WhatsApp, Signal…): put `MEDIA:<file_path>` on its own line
      for every file to send (the tool's `media_tag`). The file path appears ONLY on that line, never
      in prose, or the file is sent twice. Markdown links and images are not delivered.
    - CLI/terminal: give the file path.
    Completion: every sound produced is delivered once on the user's surface.
-6. A sound pack: generate each sound (steps 3-4), then run `pack`; deliver the zip via `MEDIA:` on
-   messaging, or the zip path on Desktop/CLI, plus the manifest summary. Completion: the zip exists and
+6. A sound pack: generate each sound (steps 3-4), then run `pack`; deliver the zip on its own
+   `MEDIA:` line (messaging and Desktop) or as a path (CLI), plus the manifest summary. Completion: the zip exists and
    `manifest.json` lists every sound.
 7. End with what was made: per sound the duration, format and the credits billed, plus the loop
    verdict when a loop was checked. Offer the next step (variations, shorter/longer, a loop, the other model).
@@ -143,10 +150,13 @@ python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py pack --name NAME --out-dir DIR F
 ## Pitfalls
 
 - The format can't be chosen per call; convert locally instead of changing the user's setting.
-- 44.1 kHz WAV and 192 kbps MP3 need higher ElevenLabs plans; a plan error is reported by the tool as
-  "ElevenLabs returned HTTP 4xx: ...". Report it; suggest the default format.
-- An auto-length sound (no `duration_seconds`) is billed a flat amount per generation, whatever the
-  prompt length; with `duration_seconds` set, the bill is per second. Quote `billed_characters`.
+- ElevenLabs documents 44.1 kHz WAV for its Pro plan and above and 192 kbps MP3 for Creator and
+  above. If the account's plan refuses a format, the tool reports "ElevenLabs returned HTTP 4xx: ...":
+  report it and suggest the default format.
+- An auto-length sound (no `duration_seconds`) is billed a flat amount per generation (~50 credits
+  measured, for 2 s and 3 s clips alike), whatever the prompt length; with `duration_seconds` set, the
+  bill is per second (~10 credits/s). Quote `billed_characters`.
+- Prompts over 450 characters are refused by the tool before any request; shorten them.
 - Post-processing runs where the `terminal` tool runs. With a non-local terminal backend (Docker, SSH,
   Modal) the generated files and this script are not there and every call reports `bad_input`; then
   deliver the original sound and say processing needs the local terminal.

@@ -182,9 +182,23 @@ export const currentScope = (): ScopeKey => ({
   connection: host.state?.connectionId?.get() ?? ''
 })
 
-/** Re-run `fn` when the active profile or connection changes (ctx.rest then reaches another backend). */
+/** Run `fn` when the active profile or connection CHANGES (ctx.rest then reaches another backend). The
+ *  host's atoms call a subscriber once immediately with the current value; that call is not a change and
+ *  must not trigger a second fetch on mount. */
 export function onScopeChange(fn: () => void): () => void {
-  const offs = [host.state?.profile?.subscribe(() => fn()), host.state?.connectionId?.subscribe(() => fn())]
+  const key = () => {
+    const s = currentScope()
+    return `${s.profile}\u0000${s.connection}`
+  }
+  let last = key()
+  const check = () => {
+    const now = key()
+    if (now !== last) {
+      last = now
+      fn()
+    }
+  }
+  const offs = [host.state?.profile?.subscribe(check), host.state?.connectionId?.subscribe(check)]
   return () => offs.forEach(off => off?.())
 }
 

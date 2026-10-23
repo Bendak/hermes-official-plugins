@@ -62,7 +62,8 @@ export function billed(rec: Pick<SoundRecord, 'billed_characters'>): null | numb
 }
 
 /** Credits per second, derived only from a sound that had an explicit duration (an auto-length sound is
- *  billed by the prompt, so it says nothing about the per-second price). */
+ *  billed a flat amount per generation, ~50 credits measured, so it says nothing about the per-second
+ *  price). */
 export function ratePerSecond(rec: Pick<SoundRecord, 'billed_characters' | 'duration_seconds'>): null | number {
   const b = billed(rec)
   const d = rec.duration_seconds

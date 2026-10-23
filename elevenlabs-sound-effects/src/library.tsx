@@ -19,8 +19,11 @@ import {
 } from './sound.ts'
 import { Chip, DownloadMenu, S, Transport, useSound, Waveform, Where } from './ui.tsx'
 
+const PAGE = 200
+
 interface Library extends HostInfo {
   sounds: SoundRecord[]
+  readable?: number
   total: number
   totals: Record<string, { count: number; bytes: number; missing: number }>
 }
@@ -53,6 +56,7 @@ export function SoundLibrary({ ctx, refreshSignal }: { ctx: PluginContext; refre
   const [reload, setReload] = useState(0)
   const [kind, setKind] = useState<string>('all')
   const [query, setQuery] = useState('')
+  const [shownCount, setShownCount] = useState(PAGE)
 
   useEffect(
     () =>
@@ -155,7 +159,16 @@ export function SoundLibrary({ ctx, refreshSignal }: { ctx: PluginContext; refre
           ) : shown.length === 0 ? (
             <span style={S.muted}>No sounds match.</span>
           ) : (
-            shown.map(rec => <LibraryRow ctx={ctx} info={data} key={rec.id} rec={rec} remote={remote} />)
+            <>
+              {shown.slice(0, shownCount).map(rec => (
+                <LibraryRow ctx={ctx} info={data} key={rec.id} rec={rec} remote={remote} />
+              ))}
+              {shown.length > shownCount && (
+                <Button onClick={() => setShownCount(c => c + PAGE)} size="sm" variant="outline">
+                  Show more ({shown.length - shownCount} more)
+                </Button>
+              )}
+            </>
           )}
         </>
       )}

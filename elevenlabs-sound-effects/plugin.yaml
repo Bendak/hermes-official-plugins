@@ -37,7 +37,7 @@ config_schema:
     choices: [mp3_44100_128, mp3_44100_192, opus_48000_128, opus_48000_192, wav_44100, wav_48000]
     default: mp3_44100_128
     label: Audio format
-    description: "192 kbps MP3 needs the Creator plan or above; 44.1 kHz WAV needs Pro or above."
+    description: "ElevenLabs documents 192 kbps MP3 for Creator plans and up, 44.1 kHz WAV for Pro and up."
   api_base_url:
     type: str
     default: https://api.elevenlabs.io
