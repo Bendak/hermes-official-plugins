@@ -66,8 +66,9 @@ SCHEMA = {
         "Describe the sound concretely (source, material, space, intensity), e.g. 'heavy wooden door "
         "creaking open in a stone hall'; at most 450 characters. When the user names a length, pass it "
         "as duration_seconds, never in the prompt text. Returns the saved file path and a MEDIA: line; include that "
-        "MEDIA: line in your reply to send the audio to the user. Each call is billed to the user's "
-        "ElevenLabs account."
+        "MEDIA: line in your reply to send the audio to the user. In Hermes Desktop, put the result's "
+        "desktop_card line on its own paragraph instead (it renders a playable card). Each call is billed "
+        "to the user's ElevenLabs account."
     ),
     "parameters": {
         "type": "object",
@@ -318,6 +319,7 @@ def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -
     path = _save(audio, body["text"], output_format, sound_id)
     result = {
         "success": True, "file_path": path, "media_tag": f"MEDIA:{path}", "sound_id": sound_id,
+        "desktop_card": f'::elevenlabs-sfx{{id="{sound_id}"}}',
         "model": model, "output_format": output_format, "loop": body["loop"],
         "duration_seconds": body.get("duration_seconds"), "bytes": len(audio),
     }

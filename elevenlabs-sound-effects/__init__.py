@@ -13,6 +13,8 @@ from . import sound_effects as _sfx
 
 TOOLSET = "elevenlabs_sound_effects"
 SKILL = "elevenlabs-sound-design"
+# Shown in <available_skills>; the 60-character limit applies (same text as the SKILL.md frontmatter).
+SKILL_DESCRIPTION = "Write ElevenLabs sound effect prompts, loops and packs."
 
 
 def register(ctx) -> None:
@@ -26,7 +28,7 @@ def register(ctx) -> None:
     )
     ctx.register_skill(
         name=SKILL, path=Path(__file__).resolve().parent / "skills" / SKILL / "SKILL.md",
-        description="Write ElevenLabs sound effect prompts, loops and sound packs; deliver by surface.",
+        description=SKILL_DESCRIPTION,
     )
 
 
