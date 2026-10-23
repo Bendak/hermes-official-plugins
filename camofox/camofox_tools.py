@@ -217,6 +217,8 @@ def browser_scroll(direction: str, task_id: Optional[str] = None) -> str:
     for _ in range(_SCROLL_REPEAT):
         result = _tab_action(task_id, "scroll", {"direction": direction},
                              lambda data: {"success": True, "scrolled": direction})
+        if not json.loads(result).get("success"):
+            break  # a failed step (tab replaced or gone) is the answer; the rest would hide it
     return result
 
 
