@@ -23,6 +23,13 @@ export function formatOf(path: string): string {
   return dot > 0 ? name.slice(dot + 1).toLowerCase() : ''
 }
 
+/** The format a task card opens: the backend's pick when it is one the viewer draws, else GLB (older backends
+ *  send no `view_format`, and their cards only showed View for a GLB). */
+export function openFormat(info: { view_format?: null | string } | null | undefined): string {
+  const pick = info?.view_format
+  return pick && (VIEWABLE_FORMATS as readonly string[]).includes(pick) ? pick : 'glb'
+}
+
 export function canRender(path: string): boolean {
   return (VIEWABLE_FORMATS as readonly string[]).includes(formatOf(path))
 }

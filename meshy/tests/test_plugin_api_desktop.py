@@ -188,3 +188,12 @@ def test_upload_refuses_a_symlinked_uploads_folder(api, client):
     body, ctype = _electron_multipart("m.glb", b"glTF")
     assert client.post("/upload", content=body, headers={"content-type": ctype}).status_code == 403
     assert list(target.iterdir()) == []
+
+
+def test_upload_disk_failure_is_a_json_error(api, client, monkeypatch):
+    def full(*_a, **_k):
+        raise OSError(28, "No space left on device")
+
+    monkeypatch.setattr(api, "_staging", full)
+    res = client.post("/upload", json={"filename": "a.glb", "data": base64.b64encode(b"glTF-bytes").decode()})
+    assert res.status_code == 500 and "No space left on device" in res.json()["detail"]
