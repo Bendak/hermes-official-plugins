@@ -88,6 +88,19 @@ def test_each_turn_end_closes_that_tasks_ephemeral_session(camofox):
     assert len(camofox.calls("DELETE")) == 1
 
 
+def test_headed_browser_keeps_its_tab_across_turns(camofox, write_config):
+    """Core skipped the per-turn browser cleanup with ``browser.headed: true`` (someone is watching
+    the window); the session still closes when the conversation is finalized."""
+    write_config("browser:\n  headed: true\n")
+    ctx = _Ctx()
+    camofox_plugin.register(ctx)
+    ctx.tools["browser_navigate"]["handler"]({"url": "https://example.com"}, task_id="sess-1")
+    ctx.hooks["on_session_end"](session_id="sess-1", task_id="sess-1", completed=True)
+    assert camofox.calls("DELETE") == []
+    ctx.hooks["on_session_finalize"](session_id="sess-1", platform="cli")
+    assert len(camofox.calls("DELETE")) == 1
+
+
 def test_session_finalize_closes_the_ephemeral_session(camofox):
     ctx = _Ctx()
     camofox_plugin.register(ctx)

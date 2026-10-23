@@ -441,6 +441,11 @@ def check_camofox_configured() -> bool:
     return bool(client.get_camofox_url())
 
 
+def headed_mode() -> bool:
+    """``browser.headed`` for the active profile (core's per-turn cleanup skip)."""
+    return policy._truthy(policy._browser_cfg("headed"))
+
+
 def cleanup_task(task_id: Optional[str]) -> None:
     """End-of-session cleanup: managed identities keep their server-side profile, ephemeral
     sessions are deleted on the server."""
