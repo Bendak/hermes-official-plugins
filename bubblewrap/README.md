@@ -115,6 +115,12 @@ file tools refuse to write. A `home_allow` entry that names one is ignored with 
 allowed entry the same holds: `~/.cargo` is visible, `~/.cargo/credentials.toml` shows as an empty
 file, and so do `~/.gem/credentials`, `~/.m2/settings.xml` and `~/.config/npm/npmrc`.
 
+An allowed dot entry that is a symlink stays a symlink inside the sandbox, so it resolves only when
+its target is visible. A dotfiles repository in a dot directory (`~/.gitconfig` linked to
+`~/.dotfiles/git/gitconfig`) and a CA bundle kept in one (`SSL_CERT_FILE=~/.certs/corp.pem`) need that
+directory in `home_allow` (`[".dotfiles"]`, `[".certs"]`): it then shows read-only, with the credential
+stores below it still hidden. A repository in a non-dot directory (`~/dotfiles`) needs nothing.
+
 The allowlist and the hidden set are fixed when the backend starts, so a command cannot widen them by
 changing `PATH`. The listing of the home directory is read at every command, so a directory you create
 on the host shows up in the next command.

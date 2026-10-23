@@ -77,6 +77,7 @@ DENIED_HOME_PATHS: tuple[str, ...] = (
     ".config/pnpm/rc",
     ".local/share/uv/credentials",
     ".cache/huggingface/token",
+    ".cache/huggingface/stored_tokens",
 )
 
 
