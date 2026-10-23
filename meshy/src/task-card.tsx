@@ -25,6 +25,8 @@ interface TaskInfo {
   has_model: boolean
   /** Best format the viewer can open (backend 0.5+); a Convert task may carry FBX/STL and no GLB. */
   view_format?: null | string
+  /** Any downloadable file, viewable or not (a Convert-to-BLEND task); older backends omit it. */
+  has_files?: boolean
   error: null | string
 }
 
@@ -178,7 +180,7 @@ export function TaskCard({
         {done && typeof info?.credits === 'number' && <span style={V.itemSub}>{info.credits} cr</span>}
         <span style={V.spacer} />
         {done && !streaming && <ActionMenu chat={chat} rest={rest} task={task} />}
-        {done && info?.has_model && !streaming && <FormatMenu chat={chat} os={os} rest={rest} task={task} />}
+        {done && (info?.has_files ?? info?.has_model) && !streaming && <FormatMenu chat={chat} os={os} rest={rest} task={task} />}
         {done && info?.has_model && (
           <Button disabled={opening} onClick={() => void open(s => openInWorkspace(s, name))} size="sm" variant="ghost">
             <Codicon name="link-external" /> Open

@@ -172,6 +172,16 @@ def _meshy_error(exc: Exception) -> HTTPException:
     return HTTPException(status_code=502, detail="Meshy API unreachable")
 
 
+def _meshy_message(exc: urllib.error.HTTPError) -> str:
+    """Meshy's own one-line reason from an error body (``{"message": ...}``), else the status."""
+    try:
+        body = json.loads(exc.read(4096).decode("utf-8", "replace"))
+    except (OSError, ValueError, AttributeError):
+        body = None
+    text = body.get("message") if isinstance(body, dict) else None
+    return " ".join(str(text).split())[:200] if text else f"HTTP {exc.code}"
+
+
 def _disk_error(exc: OSError) -> HTTPException:
     return HTTPException(status_code=500, detail=f"could not write the file ({exc.strerror or type(exc).__name__})")
 
@@ -573,7 +583,7 @@ def _result_urls(row: dict) -> dict[str, str]:
 
 
 # The model formats Desktop's viewer opens, best first (src/formats.ts ranks them the same way).
-_VIEW_ORDER = ("glb", "gltf", "fbx", "usdz", "obj", "3mf", "stl")
+_VIEW_ORDER = ("glb", "fbx", "usdz", "obj", "3mf", "stl")  # formats /save writes
 
 
 def _viewable_format(urls: dict[str, str]) -> str | None:
@@ -624,11 +634,12 @@ def _task_at(route: str, task_id: str, key: str) -> dict | None:
     try:
         row = _meshy_get(f"{route}/{task_id}", key)
     except urllib.error.HTTPError as exc:
-        # 403 is a route this key's plan cannot read (or another account's task): not on this route.
-        if exc.code in (400, 403, 404):
+        if exc.code in (400, 404):
             return None
         if exc.code == 401:  # a revoked or mistyped key: permanent until the user fixes it, so a 4xx
             raise HTTPException(status_code=403, detail="Meshy rejected the API key") from exc
+        if exc.code == 403:  # IP allowlist, org file filtering or a plan-gated route: Meshy says which
+            raise HTTPException(status_code=403, detail=f"Meshy refused the request: {_meshy_message(exc)}") from exc
         raise _meshy_error(exc) from exc
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise _meshy_error(exc) from exc
@@ -675,14 +686,20 @@ def _task(task_id: str, key: str) -> dict:
     elif missed:
         raise HTTPException(status_code=404, detail="Meshy has no finished task with that id")
     probe = [_TASK_ROUTES[t] for t in _PROBE_FIRST]
+    errors = []
     for route in probe:
-        row = _task_at(route, task_id, key)
+        try:
+            row = _task_at(route, task_id, key)
+        except HTTPException as exc:
+            if exc.status_code != 403 or exc.detail == "Meshy rejected the API key":
+                raise
+            errors.append(exc)  # one route refused (plan-gated?): the task may still be on another
+            continue
         if row is not None:
             row, route = _owned(row, route, task_id, key)
             _remember(slot, route)
             return row
     rest = [r for r in dict.fromkeys(_TASK_ROUTES.values()) if r not in probe]
-    errors = []
     for route, found in zip(rest, _fan_out(lambda r: _task_at(r, task_id, key), rest)):
         try:
             row = found.result()
@@ -693,8 +710,8 @@ def _task(task_id: str, key: str) -> dict:
             row, route = _owned(row, route, task_id, key)
             _remember(slot, route)
             return row
-    if errors:
-        raise errors[0]
+    if errors:  # never remembered as a miss; an outage (retried) outranks a refusal (the card stops)
+        raise next((e for e in errors if e.status_code >= 500), errors[0])
     _remember(slot, None)
     raise HTTPException(status_code=404, detail="Meshy has no finished task with that id")
 
@@ -973,6 +990,7 @@ def task_state(task: str):
         "thumbnail": row.get("thumbnail_url") if isinstance(row.get("thumbnail_url"), str) else None,
         "credits": row.get("consumed_credits"),
         "has_model": view is not None, "view_format": view,
+        "has_files": any(":" not in k for k in urls),  # e.g. a Convert-to-BLEND task: downloadable, not viewable
         "error": (str(error.get("message") or "") or status.lower()) if status in _TERMINAL_FAILED else None,
     }
 
