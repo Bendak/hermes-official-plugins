@@ -69,7 +69,13 @@ DENIED_HOME_PATHS: tuple[str, ...] = (
     ".cargo/credentials",
     ".cargo/credentials.toml",
     ".m2/settings.xml",
+    ".m2/settings-security.xml",
     ".gradle/gradle.properties",
+    ".gem/credentials",
+    ".pub-cache/credentials.json",
+    ".config/npm/npmrc",
+    ".config/pnpm/rc",
+    ".local/share/uv/credentials",
     ".cache/huggingface/token",
 )
 
