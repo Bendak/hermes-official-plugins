@@ -84,11 +84,11 @@ to seek, Play/Pause, a **Loop** toggle that repeats the sound gaplessly so you c
 **Download** (the original, or MP3 / WAV / OGG converted by ffmpeg on the machine Hermes runs on;
 saved through Desktop's Save dialog on your computer), and **Reveal** in your file manager. **Next**
 offers 3 variations, shorter, longer, make it loop and try the other model. Each row shows its cost
-worked out from what ElevenLabs billed for this sound (for an automatic-length sound the per-second
-price isn't known, and the row says so), and sends a chat message to the agent naming the tool and its
-arguments. Nothing is billed until the agent runs the tool. The message goes to the chat the card is in
-(Desktop builds that tell plugins which chat shows a card), else to the chat that made the sound,
-opening it if needed.
+worked out from what ElevenLabs billed for this sound (an automatic-length sound is billed a flat
+amount per generation, so its per-second price isn't known, and the row says so), and sends a chat message to the agent naming the tool and its
+arguments. Nothing is billed until the agent runs the tool. On Desktop builds that tell plugins which
+chat shows a card, the message goes to that chat, and nowhere else: if that chat is not on screen,
+Desktop shows a notice instead. Older builds send it to the chat you last typed in.
 
 **Sound library.** ⌘K → **ElevenLabs: open sound library** opens a tab listing every sound the tool
 made in the active profile, MP3, Ogg Opus and WAV alike, with per-format counts and sizes, a format
@@ -105,9 +105,10 @@ and don't appear in the library.
 ## Cost and privacy
 
 Every call is a paid ElevenLabs generation billed to your account: ElevenLabs charges per second of
-audio when a duration is set and by the prompt otherwise (see their
+audio when a duration is set and a flat amount per generation otherwise (see their
 [pricing](https://elevenlabs.io/pricing/api)). The tool reports the `character-cost` header
-ElevenLabs returns as `billed_characters`. What leaves your machine: the sound description and the
+ElevenLabs returns as `billed_characters`. Desktop format conversions and the processing script run
+locally and cost nothing. What leaves your machine: the sound description and the
 parameters above, sent to `api_base_url` with your API key. Nothing else from the conversation is
 sent.
 
@@ -117,8 +118,10 @@ The bundled skill runs `skills/elevenlabs-sound-design/scripts/sfx_tool.py` (Pyt
 plus `ffmpeg`/`ffprobe` on PATH) when a sound needs processing:
 
 ```bash
-python3 sfx_tool.py process in.wav --out out.ogg --loudness -16 --fade-ms 10   # trim + normalise + fade + convert
-python3 sfx_tool.py loopcheck loop.wav                                         # seamless | click
+python3 sfx_tool.py process in.wav --out out.ogg --trim --loudness -16 --fade-ms 10   # one-shot: trim + normalise + fade + convert
+python3 sfx_tool.py process loop.mp3 --out loop.ogg                                   # plain conversion keeps a loop's edges
+python3 sfx_tool.py loopfix loop.wav --out fixed.wav                                  # crossfade the seam
+python3 sfx_tool.py loopcheck fixed.wav                                               # seamless | click | gap
 python3 sfx_tool.py pack a.mp3 b.mp3 --name "UI pack" --out-dir . --format ogg # folder + manifest.json + zip
 ```
 

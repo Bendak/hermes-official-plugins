@@ -11,7 +11,7 @@ import {
   DropdownMenuTrigger,
   host
 } from '@hermes/plugin-sdk'
-import { type CSSProperties, type ReactNode, useEffect, useRef, useState } from 'react'
+import { type CSSProperties, type ReactNode, useEffect, useId, useRef, useState } from 'react'
 
 import { decode, errorText, fetchAudio, peaks, player, saveDownload, sendToChat } from './audio.ts'
 import { type HostInfo, kindLabel, nextActions, type SoundRecord } from './sound.ts'
@@ -93,7 +93,9 @@ type Loaded = { state: 'idle' } | { state: 'loading' } | { state: 'error'; messa
  * Loads (once) and plays one sound. The decoded audio stays in this component; nothing polls. While it
  * plays, one animation frame per paint advances the progress bar, and the loop stops when playback does.
  */
-export function useSound(ctx: PluginContext, rec: null | SoundRecord, owner: string) {
+export function useSound(ctx: PluginContext, rec: null | SoundRecord, ownerPrefix: string) {
+  // One owner per mount: two cards for the same sound must not stop each other on unmount.
+  const owner = `${ownerPrefix}:${useId()}`
   const [loaded, setLoaded] = useState<Loaded>({ state: 'idle' })
   const [, setTick] = useState(0)
   const [loop, setLoop] = useState(Boolean(rec?.loop))
@@ -270,6 +272,7 @@ export function Where({ ctx, rec, info, remote }: { ctx: PluginContext; rec: Sou
 
 /** Next actions: each sends a chat message (the agent runs the tool, its approval and billing apply). */
 export function NextMenu({ rec, measured, directiveSession }: { rec: SoundRecord; measured: null | number; directiveSession: null | string | undefined }) {
+  // `directiveSession` is this render's prop: the chat that shows the card, fixed for the card's life.
   const actions = nextActions(rec, measured)
   if (actions.length === 0) return null
   return (
@@ -286,9 +289,9 @@ export function NextMenu({ rec, measured, directiveSession }: { rec: SoundRecord
             data-sfx-action={a.id}
             key={a.id}
             onSelect={() => {
-              void sendToChat(directiveSession, rec, a.message).then(ok => {
-                if (!ok) host.notify({ kind: 'warning', message: 'Open the chat this sound came from, then try again.' })
-              })
+              if (!sendToChat(directiveSession, a.message)) {
+                host.notify({ kind: 'warning', message: 'This card’s chat is not open on screen: open it, then try again.' })
+              }
             }}
             title={a.message}
           >

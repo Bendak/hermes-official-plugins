@@ -3,8 +3,6 @@
 
 import { host, type PluginContext } from '@hermes/plugin-sdk'
 
-import type { SoundRecord } from './sound.ts'
-
 export interface AudioPayload {
   id: string
   format: string
@@ -189,39 +187,21 @@ export function onScopeChange(fn: () => void): () => void {
 }
 
 /**
- * Send a follow-up into the chat a sound belongs to. Order: the chat whose transcript shows the card
- * (`directiveSession`, from hosts with the directive-owner seam), then the chat that generated the sound
- * (its provenance record), opening that chat if it isn't on screen. Addressed submits fail closed, so a
- * known target never falls through to whichever composer happens to be active. Only when neither is known
- * (older host AND a record without a session id) does it use the active composer, the old behaviour.
+ * Send a card's follow-up into the chat that shows the card. Hosts with the directive-owner seam pass
+ * `sessionId` (a string, or null for a chat with no session yet) and `host.composer.submit` fails closed
+ * when that chat's composer is not visible; `undefined` means an older host, where the active composer
+ * (null) is the only address there is. The id is captured when the card renders and the submit runs
+ * synchronously on click, before any await, so moving to another chat cannot redirect it.
  */
-export async function sendToChat(directiveSession: null | string | undefined, rec: SoundRecord, text: string): Promise<boolean> {
+export function sendToChat(directiveSession: null | string | undefined, text: string): boolean {
   const submit = host.composer?.submit
   if (typeof submit !== 'function') return false
-  const targets = [directiveSession, rec.session_id].filter((t, i, all): t is string => !!t && all.indexOf(t) === i)
-  if (targets.length === 0) return submit(null, text)
-  for (const target of targets) {
-    if (submit(target, text)) return true
-  }
-  const own = targets[targets.length - 1]
-  if (typeof host.openSession === 'function') {
-    try {
-      await host.openSession(own)
-    } catch {
-      return false
-    }
-    for (let attempt = 0; attempt < 10; attempt++) {
-      // The opened chat's composer mounts a moment later; bounded wait, then give up.
-      await new Promise(resolve => setTimeout(resolve, 300))
-      if (submit(own, text)) return true
-    }
-  }
-  return false
+  return submit(directiveSession !== undefined ? directiveSession : null, text)
 }
 
 /** Bytes for one format through the plugin backend (works against a remote Hermes too). */
 export const fetchAudio = (ctx: PluginContext, id: string, format: string) =>
-  ctx.rest<AudioPayload>(`audio?id=${encodeURIComponent(id)}&format=${encodeURIComponent(format)}`, { timeoutMs: 90_000 })
+  ctx.rest<AudioPayload>(`audio?id=${encodeURIComponent(id)}&format=${encodeURIComponent(format)}`, { timeoutMs: 60_000 })
 
 /** Hand the bytes to the Desktop's download handler (Save dialog in Downloads on THIS machine). */
 export async function saveDownload(payload: AudioPayload): Promise<void> {

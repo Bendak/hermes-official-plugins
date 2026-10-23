@@ -30,7 +30,8 @@ from fastapi import APIRouter, HTTPException, Query
 router = APIRouter()
 
 _MAX_AUDIO_BYTES = 50 * 1024 * 1024
-_CONVERT_TIMEOUT = 60
+# Under the plugin host's 60 s request cap, so a slow conversion reports its own error.
+_CONVERT_TIMEOUT = 45
 _MIME = {"mp3": "audio/mpeg", "opus": "audio/ogg", "ogg": "audio/ogg", "wav": "audio/wav"}
 # Output format setting → container the tool wrote (plugin.yaml choices).
 _KIND = {"mp3_44100_128": "mp3", "mp3_44100_192": "mp3", "opus_48000_128": "opus",
@@ -136,14 +137,23 @@ def audio(id: str = Query(""), format: str = Query("original")) -> dict:  # noqa
     row = _record(id)
     if format != "original" and format not in _CONVERSIONS:
         raise HTTPException(status_code=400, detail=f"format must be original or one of {', '.join(sorted(_CONVERSIONS))}")
+    gone = HTTPException(status_code=410, detail="the sound file is no longer on the Hermes host")
     path = _prov.audio_path(row)
     if path is None:
-        raise HTTPException(status_code=410, detail="the sound file is no longer on the Hermes host")
-    if path.stat().st_size > _MAX_AUDIO_BYTES:
+        raise gone
+    try:
+        too_big = path.stat().st_size > _MAX_AUDIO_BYTES
+    except OSError:
+        raise gone from None
+    if too_big:
         raise HTTPException(status_code=413, detail="sound file is over the 50 MB cap")
     kind = _KIND.get(row.get("output_format") or "", path.suffix.lstrip("."))
     if format in ("original", kind):
-        data, ext = path.read_bytes(), path.suffix.lstrip(".")
+        try:
+            data = path.read_bytes()
+        except OSError:
+            raise gone from None
+        ext = path.suffix.lstrip(".")
     else:
         ffmpeg = _ffmpeg()
         if not ffmpeg:

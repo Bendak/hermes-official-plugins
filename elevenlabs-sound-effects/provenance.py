@@ -55,7 +55,18 @@ def record(entry: dict[str, Any]) -> None:
         # O_APPEND: each write lands at the end even with several writers (one short line per write).
         fd = os.open(directory / FILE_NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
         try:
-            os.write(fd, line.encode("utf-8"))
+            if os.name == "nt":  # pragma: no cover - Windows emulates O_APPEND with seek+write: lock it
+                import msvcrt
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+                try:
+                    os.lseek(fd, 0, os.SEEK_END)
+                    os.write(fd, line.encode("utf-8"))
+                finally:
+                    os.lseek(fd, 0, os.SEEK_SET)
+                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+            else:
+                os.write(fd, line.encode("utf-8"))
         finally:
             os.close(fd)
     except (OSError, ImportError, RuntimeError, ValueError):
@@ -73,8 +84,8 @@ def read_all() -> list[dict[str, Any]]:
     except (OSError, ImportError, RuntimeError, ValueError):
         return []
     lines = raw.split(b"\n")
-    if len(raw) == _TAIL_BYTES and lines:
-        lines = lines[1:]  # the first line may start mid-record
+    if size > _TAIL_BYTES and lines:
+        lines = lines[1:]  # the read started mid-file: the first line may be partial
     seen: set[str] = set()
     rows: list[dict[str, Any]] = []
     for line in reversed(lines):

@@ -64,9 +64,14 @@ Keep one sound per call. For a set, make one call per sound with a consistent st
 
 - Set `loop: true` and a `duration_seconds` long enough to avoid obvious repetition (6-20 s for
   ambience, a whole number of bars for music: at 90 BPM one 4/4 bar is 2.667 s).
-- Verify the seam before calling it seamless: run the `loopcheck` step below and report its verdict.
-  A loop flagged `click` gets a 5-10 ms crossfade via `process --fade-ms 8 --no-trim`, or a regeneration.
-- Never trim silence or add fades to a loop unless the check fails: both break the seam.
+- Verify the seam before calling it seamless: run `loopcheck` (below) on the file you deliver and report
+  its verdict (`seamless`, `click` or `gap`).
+- A loop flagged `click`: run `loopfix` (crossfades the end into the start, 20 ms by default), then
+  `loopcheck` the result; or regenerate. Never "fix" a loop with `process --fade-ms`: fades dip to
+  silence at every repeat (`loopcheck` reports that as `gap`).
+- Never pass `--trim` or `--fade-ms` to `process` for a loop; plain conversion keeps the edges.
+- Lossy OGG/MP3 can add a small edge artifact a WAV does not have: if the converted file checks
+  `click` while the WAV is `seamless`, deliver the WAV.
 
 ## Format by destination
 
@@ -85,24 +90,28 @@ engine; convert loops to OGG or WAV.
 `scripts/sfx_tool.py` (stdlib Python + ffmpeg/ffprobe). Every run prints exactly one JSON line,
 `{"ok": true, ...}` or `{"ok": false, "error": "...", "code": "..."}`, and exits 0 or 1; read that
 line, never guess. Codes: `ffmpeg_missing`, `bad_input`, `bad_args`, `ffmpeg_failed`.
-Run it with `terminal`, using the script's path inside this skill's directory:
+Run it with `terminal`:
 
 ```
-python3 <skill_dir>/scripts/sfx_tool.py probe IN
-python3 <skill_dir>/scripts/sfx_tool.py process IN --out OUT.ogg [--trim] [--loudness -16] [--fade-ms 10] [--no-trim]
-python3 <skill_dir>/scripts/sfx_tool.py loopcheck IN
-python3 <skill_dir>/scripts/sfx_tool.py pack --name NAME --out-dir DIR FILE [FILE ...] [--format ogg|wav|mp3] [--prompts prompts.json]
+python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py probe IN
+python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py process IN --out OUT.ogg [--trim] [--loudness -16] [--fade-ms 10]
+python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py loopfix IN --out OUT.wav [--crossfade-ms 20]
+python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py loopcheck IN
+python3 ${HERMES_SKILL_DIR}/scripts/sfx_tool.py pack --name NAME --out-dir DIR FILE [FILE ...] [--format ogg|wav|mp3] [--prompts prompts.json]
 ```
 
-- `process`: trims leading/trailing silence (`--trim`, default on for one-shots; `--no-trim` for
-  loops), loudness-normalises to `--loudness` LUFS (EBU R128; -16 for chat/web, -23 for broadcast
-  video, -14 to -18 for games), applies `--fade-ms` in/out fades, and writes the format implied by
-  `OUT`'s extension (`.ogg` Vorbis, `.wav` 16-bit PCM, `.mp3`). It never overwrites its input.
-- `loopcheck`: compares the last and first samples of the file; verdict `seamless` or `click`
-  with the jump size. Report the verdict as measured.
+- `process`: converts to the format implied by `OUT`'s extension (`.ogg` Vorbis, `.wav` 16-bit PCM,
+  `.mp3`, `.opus`). Options for one-shots: `--trim` removes leading/trailing silence, `--loudness`
+  normalises to that many LUFS (EBU R128; -16 for chat/web, -23 for broadcast video, -14 to -18 for
+  games), `--fade-ms` adds in/out fades. Without options it only converts. It never overwrites its input.
+- `loopfix`: equal-power crossfade of the loop's last N ms into its first N ms; the result is N ms
+  shorter and repeats without a click or a dip.
+- `loopcheck`: verdict `seamless`, `click` (the last and first samples jump) or `gap` (the seam fades
+  to near-silence). Report the verdict as measured.
 - `pack`: copies (and converts with `--format`) the files into `DIR/NAME/` with tidy names, writes
   `manifest.json` (file, duration, sample rate, channels, format, and the prompt for each file when
-  `--prompts` maps file names to prompts) and `DIR/NAME.zip`.
+  `--prompts` maps file names to prompts) and `DIR/NAME.zip`. `--force` replaces an earlier pack of
+  the same name completely.
 
 ## Procedure
 
@@ -117,7 +126,7 @@ python3 <skill_dir>/scripts/sfx_tool.py pack --name NAME --out-dir DIR FILE [FIL
 4. Post-process only when the destination needs it (format, loudness, trimming, a loop check).
    Completion: the script printed `"ok": true` for every file, or you report its error line.
 5. Deliver by surface:
-   - Hermes Desktop: one line of text, then the card directive on its own paragraph:
+   - Hermes Desktop: one line of text, then the result's `desktop_card` line on its own paragraph:
      `::elevenlabs-sfx{id="<sound_id>"}`. The card plays, loops and downloads the sound. Do not add a
      MEDIA: line on Desktop (the card already shows the file).
    - Messaging (Telegram, Discord, Slack, WhatsApp, Signal…): put `MEDIA:<file_path>` on its own line
@@ -136,7 +145,11 @@ python3 <skill_dir>/scripts/sfx_tool.py pack --name NAME --out-dir DIR FILE [FIL
 - The format can't be chosen per call; convert locally instead of changing the user's setting.
 - 44.1 kHz WAV and 192 kbps MP3 need higher ElevenLabs plans; a plan error is reported by the tool as
   "ElevenLabs returned HTTP 4xx: ...". Report it; suggest the default format.
-- An auto-length sound (no `duration_seconds`) is billed by the prompt, not per second.
+- An auto-length sound (no `duration_seconds`) is billed a flat amount per generation, whatever the
+  prompt length; with `duration_seconds` set, the bill is per second. Quote `billed_characters`.
+- Post-processing runs where the `terminal` tool runs. With a non-local terminal backend (Docker, SSH,
+  Modal) the generated files and this script are not there and every call reports `bad_input`; then
+  deliver the original sound and say processing needs the local terminal.
 - The card directive is Desktop-only: other clients print it as text.
 - Files live on the machine Hermes runs on. A Desktop connected to a remote Hermes still plays and
   downloads through the card; paths in replies are paths on that host.

@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Local post-processing for generated sound effects (stdlib + ffmpeg/ffprobe).
 
-Subcommands: probe, process (trim silence, loudness-normalise, fades, convert), loopcheck (seam
-click check), pack (named folder + manifest.json + zip). Every run prints exactly ONE JSON line on
+Subcommands: probe, process (trim silence, loudness-normalise, fades, convert), loopfix (crossfade
+a loop's end into its start), loopcheck (seam click/gap check), pack (named folder + manifest.json +
+zip). Every run prints exactly ONE JSON line on
 stdout, ``{"ok": true, ...}`` or ``{"ok": false, "code": ..., "error": ...}``, and exits 0 or 1. It
 never prints a traceback: ffmpeg missing, a bad input file or bad arguments all come back as that
 line, so an agent can read the outcome instead of guessing.
@@ -43,7 +44,9 @@ class _Parser(argparse.ArgumentParser):
 
 
 def emit(payload: dict) -> int:
-    sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+    # ASCII-only: a Windows pipe uses the ANSI code page, and a non-ASCII path must not turn the
+    # one JSON line into a UnicodeEncodeError traceback.
+    sys.stdout.write(json.dumps(payload, ensure_ascii=True) + "\n")
     sys.stdout.flush()
     return 0 if payload.get("ok") else 1
 
@@ -119,7 +122,8 @@ def _encode(ffmpeg: str, src: Path, out: Path, chain: list[str], sample_rate: in
     if chain:
         cmd += ["-af", ",".join(chain)]
     if sample_rate:  # loudnorm resamples to 192 kHz internally; keep the source rate
-        cmd += ["-ar", str(sample_rate)]
+        # libopus takes only 48/24/16/12/8 kHz.
+        cmd += ["-ar", "48000" if out.suffix.lower() == ".opus" else str(sample_rate)]
     cmd += CODECS[out.suffix.lower()]
     # Write beside the target and rename, so a failed run never leaves a half-written file at OUT.
     fd, tmp = tempfile.mkstemp(prefix=".sfx_tool_", suffix=out.suffix, dir=out.parent)
@@ -162,20 +166,66 @@ def cmd_process(args) -> dict:
             "applied": {"trim_silence": args.trim, "loudness_lufs": args.loudness, "fade_ms": args.fade_ms}}
 
 
-def _pcm(ffmpeg: str, src: Path) -> array.array:
+def _pcm_frames(ffmpeg: str, src: Path, channels: int, rate: int) -> array.array:
     proc = _run([ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(src), "-vn",
-                 "-ac", "1", "-ar", str(_LOOP_RATE), "-f", "s16le", "-acodec", "pcm_s16le", "-"])
+                 "-ac", str(channels), "-ar", str(rate), "-f", "s16le", "-acodec", "pcm_s16le", "-"])
     raw = proc.stdout[:_MAX_PCM_BYTES]
     samples = array.array("h")
-    samples.frombytes(raw[: len(raw) - len(raw) % 2])
+    samples.frombytes(raw[: len(raw) - len(raw) % (2 * channels)])
     if sys.byteorder == "big":
         samples.byteswap()
     return samples
 
 
+def cmd_loopfix(args) -> dict:
+    """Crossfade the loop's last N ms into its first N ms (equal-power) and drop that tail: playback
+    then runs from the blended start straight out of the original audio, with no dip or gap."""
+    src = _input(args.input)
+    ffmpeg, ffprobe = _tool("ffmpeg", args.ffmpeg), _tool("ffprobe", args.ffprobe)
+    out = _output(args.out, src, args.force)
+    if not 1 <= args.crossfade_ms <= 2000:
+        raise Failure("bad_args", "--crossfade-ms must be between 1 and 2000")
+    before = probe(src, ffprobe)
+    channels, rate = int(before["channels"] or 2), int(before["sample_rate"] or 48000)
+    if out.suffix.lower() == ".opus":
+        rate = 48000
+    samples = _pcm_frames(ffmpeg, src, channels, rate)
+    frames = len(samples) // channels
+    n = int(rate * args.crossfade_ms / 1000)
+    if frames < 3 * n:
+        raise Failure("bad_input", f"{src.name} is too short for a {args.crossfade_ms:g} ms crossfade")
+    keep = frames - n
+    blended = array.array("h", samples[: keep * channels])
+    for i in range(n):
+        t = (i + 0.5) / n
+        fade_in, fade_out = math.sin(t * math.pi / 2), math.cos(t * math.pi / 2)
+        for c in range(channels):
+            v = samples[i * channels + c] * fade_in + samples[(keep + i) * channels + c] * fade_out
+            blended[i * channels + c] = max(-32768, min(32767, int(round(v))))
+    if sys.byteorder == "big":
+        blended.byteswap()
+    fd, raw_path = tempfile.mkstemp(prefix=".sfx_tool_", suffix=".pcm", dir=out.parent)
+    with os.fdopen(fd, "wb") as handle:
+        handle.write(blended.tobytes())
+    try:
+        raw_src = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-f", "s16le",
+                   "-ar", str(rate), "-ac", str(channels), "-i", raw_path]
+        tmp_fd, tmp = tempfile.mkstemp(prefix=".sfx_tool_", suffix=out.suffix, dir=out.parent)
+        os.close(tmp_fd)
+        try:
+            _run(raw_src + CODECS[out.suffix.lower()] + [tmp])
+            os.replace(tmp, out)
+        finally:
+            if os.path.exists(tmp):
+                os.unlink(tmp)
+    finally:
+        os.unlink(raw_path)
+    return {"ok": True, "input": before, "output": probe(out, ffprobe), "crossfade_ms": args.crossfade_ms}
+
+
 def cmd_loopcheck(args) -> dict:
     src = _input(args.input)
-    samples = _pcm(_tool("ffmpeg", args.ffmpeg), src)
+    samples = _pcm_frames(_tool("ffmpeg", args.ffmpeg), src, 1, _LOOP_RATE)
     if len(samples) < _LOOP_RATE // 20:
         raise Failure("bad_input", f"{src.name} is shorter than 50 ms; nothing to loop")
     scale = 32768.0
@@ -189,8 +239,15 @@ def cmd_loopcheck(args) -> dict:
 
     head, tail = rms(samples[:edge]), rms(samples[-edge:])
     level_db = 20 * math.log10(max(head, 1e-6) / max(tail, 1e-6))
+    overall = rms(samples)
+    # A fade to silence at the seam is a dropout on every repeat even though the edge samples match:
+    # look at the 1 ms either side of the seam together.
+    ms = _LOOP_RATE // 1000
+    seam_level = rms(samples[-ms:].tolist() + samples[:ms].tolist())
+    gap = overall > 0.01 and seam_level < overall * 0.2
     click = seam > max(2 * typical, 0.02) or abs(level_db) > 6
-    result = {"ok": True, "file": str(src), "verdict": "click" if click else "seamless",
+    verdict = "gap" if gap else "click" if click else "seamless"
+    result = {"ok": True, "file": str(src), "verdict": verdict,
               "seam_jump": round(seam, 4), "typical_step_p99": round(typical, 4),
               "edge_level_difference_db": round(level_db, 1), "duration_seconds": round(len(samples) / _LOOP_RATE, 3)}
     if src.suffix.lower() == ".mp3":
@@ -223,9 +280,37 @@ def cmd_pack(args) -> dict:
     ffmpeg = _tool("ffmpeg", args.ffmpeg) if args.format else None
     folder = out_dir / name
     zip_path = out_dir / f"{name}.zip"
-    if (folder.exists() or zip_path.exists()) and not args.force:
+    if (folder.exists() or folder.is_symlink() or zip_path.exists() or zip_path.is_symlink()) and not args.force:
         raise Failure("bad_args", f"{folder} or {zip_path} exists; pass --force to replace them")
-    folder.mkdir(exist_ok=True)
+    # Build in a fresh staging folder and swap it in by rename: a re-pack never keeps files from an
+    # earlier pack, and never writes through a symlink left in the old folder or at the zip path.
+    staging = Path(tempfile.mkdtemp(prefix=f".{name}.staging-", dir=out_dir))
+    try:
+        entries = _fill_pack(staging, sources, prompts, args, ffmpeg, ffprobe)
+        manifest = {"name": args.name, "sounds": entries}
+        (staging / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+                                               encoding="utf-8")
+        fd, tmp_zip = tempfile.mkstemp(prefix=f".{name}.", suffix=".zip", dir=out_dir)
+        os.close(fd)
+        with zipfile.ZipFile(tmp_zip, "w", zipfile.ZIP_DEFLATED) as archive:
+            for path in sorted(staging.iterdir()):
+                archive.write(path, f"{name}/{path.name}")
+        os.replace(tmp_zip, zip_path)  # replaces a symlink itself, never its target
+        if folder.is_symlink() or folder.is_file():
+            folder.unlink()
+        elif folder.exists():
+            old = Path(tempfile.mkdtemp(prefix=f".{name}.old-", dir=out_dir))
+            os.replace(folder, old / name)
+            shutil.rmtree(old)  # rmtree removes links inside, never what they point to
+        os.replace(staging, folder)
+    finally:
+        if staging.exists():
+            shutil.rmtree(staging)
+    return {"ok": True, "folder": str(folder), "zip": str(zip_path), "count": len(entries),
+            "manifest": str(folder / "manifest.json"), "sounds": entries}
+
+
+def _fill_pack(folder: Path, sources: list[Path], prompts: dict, args, ffmpeg: str | None, ffprobe: str) -> list[dict]:
     entries, used = [], set()
     for index, src in enumerate(sources, 1):
         ext = FORMAT_EXT[args.format] if args.format else src.suffix.lower()
@@ -246,13 +331,7 @@ def cmd_pack(args) -> dict:
         if isinstance(prompt, str):
             entry["prompt"] = prompt
         entries.append(entry)
-    manifest = {"name": args.name, "sounds": entries}
-    (folder / "manifest.json").write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as archive:
-        for path in sorted(folder.iterdir()):
-            archive.write(path, f"{name}/{path.name}")
-    return {"ok": True, "folder": str(folder), "zip": str(zip_path), "count": len(entries),
-            "manifest": str(folder / "manifest.json"), "sounds": entries}
+    return entries
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -266,13 +345,20 @@ def build_parser() -> argparse.ArgumentParser:
     p = sub.add_parser("process", help="trim silence, normalise loudness, fade, convert")
     p.add_argument("input")
     p.add_argument("--out", required=True, help="output file; its extension picks the format (.ogg .wav .mp3 .opus)")
-    p.add_argument("--trim", dest="trim", action="store_true", default=True, help="trim leading/trailing silence (default)")
-    p.add_argument("--no-trim", dest="trim", action="store_false", help="keep the edges (loops)")
+    p.add_argument("--trim", dest="trim", action="store_true", default=False,
+                   help="trim leading/trailing silence (one-shots; never on loops)")
+    p.add_argument("--no-trim", dest="trim", action="store_false", help="keep the edges (the default)")
     p.add_argument("--loudness", type=float, default=None, help="target integrated loudness in LUFS, e.g. -16")
     p.add_argument("--fade-ms", type=float, default=0.0, help="fade in and out, milliseconds")
     p.add_argument("--force", action="store_true", help="replace an existing output file")
     p.set_defaults(fn=cmd_process)
-    p = sub.add_parser("loopcheck", help="check a loop's seam for a click")
+    p = sub.add_parser("loopfix", help="crossfade a loop's end into its start (fixes a click without a gap)")
+    p.add_argument("input")
+    p.add_argument("--out", required=True, help="output file; its extension picks the format")
+    p.add_argument("--crossfade-ms", type=float, default=20.0, help="crossfade length, milliseconds (default 20)")
+    p.add_argument("--force", action="store_true", help="replace an existing output file")
+    p.set_defaults(fn=cmd_loopfix)
+    p = sub.add_parser("loopcheck", help="check a loop's seam for a click or a gap")
     p.add_argument("input")
     p.set_defaults(fn=cmd_loopcheck)
     p = sub.add_parser("pack", help="named folder + manifest.json + zip")

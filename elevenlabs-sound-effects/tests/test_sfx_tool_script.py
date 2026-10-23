@@ -20,9 +20,9 @@ needs_ffmpeg = pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("
                                   reason="ffmpeg/ffprobe not installed on this runner")
 
 
-def run(*args: str) -> tuple[int, dict]:
+def run(*args: str, env: dict | None = None) -> tuple[int, dict]:
     proc = subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True,
-                          encoding="utf-8", timeout=120, check=False)
+                          encoding="utf-8", timeout=120, check=False, env=env)
     lines = proc.stdout.strip().splitlines()
     assert len(lines) == 1, f"expected one JSON line, got stdout={proc.stdout!r} stderr={proc.stderr!r}"
     assert "Traceback" not in proc.stderr and "Traceback" not in proc.stdout
@@ -50,6 +50,14 @@ def test_ffmpeg_missing_is_a_clean_json_error(tmp_path):
         assert code == 1 and out["code"] == "ffmpeg_missing" and "ffmpeg" in out["error"]
 
 
+def test_non_ascii_paths_stay_one_json_line_on_a_legacy_code_page(tmp_path):
+    import os
+
+    env = {**os.environ, "PYTHONIOENCODING": "cp1252", "PYTHONUTF8": "0"}
+    code, out = run("probe", str(tmp_path / "sonido-ñandú-音.wav"), env=env)
+    assert code == 1 and out["code"] == "bad_input" and "音" in out["error"]
+
+
 def test_bad_input_and_bad_arguments_are_clean_json_errors(tmp_path):
     assert run("probe", str(tmp_path / "missing.wav"))[1]["code"] == "bad_input"
     assert run("frobnicate")[1]["code"] == "bad_args"
@@ -69,7 +77,9 @@ def test_garbage_audio_is_reported_not_raised(tmp_path):
 def test_process_trims_normalises_fades_and_converts(tmp_path):
     src = tone(tmp_path / "padded.wav", 0.5, 440, pad=0.4)
     out_path = tmp_path / "clean.ogg"
-    code, out = run("process", str(src), "--out", str(out_path), "--loudness", "-16", "--fade-ms", "10")
+    plain = run("process", str(src), "--out", str(tmp_path / "plain.wav"))[1]
+    assert plain["output"]["duration_seconds"] == plain["input"]["duration_seconds"]  # no trim unless asked
+    code, out = run("process", str(src), "--out", str(out_path), "--trim", "--loudness", "-16", "--fade-ms", "10")
     assert code == 0 and out_path.is_file()
     assert out["output"]["codec"] == "vorbis" and out["output"]["sample_rate"] == 48000
     assert out["output"]["duration_seconds"] < out["input"]["duration_seconds"] - 0.5  # silence trimmed
@@ -89,6 +99,19 @@ def test_loopcheck_tells_a_clean_seam_from_a_click(tmp_path):
 
 
 @needs_ffmpeg
+def test_loopfix_removes_the_click_and_fades_are_reported_as_a_gap(tmp_path):
+    clicky = tone(tmp_path / "click.wav", 1.0 + 25 / 48000, 480)
+    fixed = tmp_path / "fixed.wav"
+    code, out = run("loopfix", str(clicky), "--out", str(fixed), "--crossfade-ms", "20")
+    assert code == 0 and abs(out["output"]["duration_seconds"] - (out["input"]["duration_seconds"] - 0.02)) < 0.002
+    assert run("loopcheck", str(fixed))[1]["verdict"] == "seamless"
+    faded = tmp_path / "faded.wav"
+    assert run("process", str(clicky), "--out", str(faded), "--fade-ms", "8")[0] == 0
+    assert run("loopcheck", str(faded))[1]["verdict"] == "gap"
+    assert run("process", str(clicky), "--out", str(tmp_path / "x.opus"), "--loudness", "-16")[0] == 0  # 48 kHz forced
+
+
+@needs_ffmpeg
 def test_pack_writes_folder_manifest_and_zip(tmp_path):
     a = tone(tmp_path / "sfx_coin_20261023_120000_aaaaaaaaaaaa.wav", 0.3, 880)
     b = tone(tmp_path / "sfx_door_20261023_120000_bbbbbbbbbbbb.wav", 0.4, 220)
@@ -104,3 +127,20 @@ def test_pack_writes_folder_manifest_and_zip(tmp_path):
     assert manifest["sounds"][0]["prompt"] == "retro coin pickup" and manifest["sounds"][0]["codec"] == "vorbis"
     with zipfile.ZipFile(out_dir / "ui-pack.zip") as archive:
         assert sorted(archive.namelist()) == ["ui-pack/01-coin.ogg", "ui-pack/02-door.ogg", "ui-pack/manifest.json"]
+
+    # Re-pack with fewer sounds: nothing from the earlier pack survives, and a symlink planted in the old
+    # folder is replaced, not written through.
+    victim = tmp_path / "victim.wav"
+    victim.write_bytes(b"keep me")
+    planted = out_dir / "ui-pack" / "01-coin.ogg"
+    planted.unlink()
+    try:
+        planted.symlink_to(victim)
+    except (OSError, NotImplementedError):
+        pass
+    assert run("pack", str(b), "--name", "UI Pack", "--out-dir", str(out_dir), "--force")[0] == 0
+    assert victim.read_bytes() == b"keep me"
+    assert sorted(p.name for p in (out_dir / "ui-pack").iterdir()) == ["01-door.wav", "manifest.json"]
+    with zipfile.ZipFile(out_dir / "ui-pack.zip") as archive:
+        assert sorted(archive.namelist()) == ["ui-pack/01-door.wav", "ui-pack/manifest.json"]
+    assert not [p for p in out_dir.iterdir() if p.name.startswith(".")]  # no staging leftovers

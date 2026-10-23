@@ -109,6 +109,7 @@ def test_each_generation_is_recorded_and_served_to_the_desktop(loaded, api, stan
     assert result["success"] is True
     sound_id = result["sound_id"]
     assert stand_in.bodies[-1]["model_id"] == "eleven_text_to_sound_v3"  # per-call model overrides the setting
+    assert result["desktop_card"] == f'::elevenlabs-sfx{{id="{sound_id}"}}'
     assert Path(result["file_path"]).stem.endswith(sound_id)
 
     _, client = api
@@ -215,10 +216,24 @@ def test_converts_to_every_offered_format_with_ffmpeg(api, _hermes_home):
     assert not list((module._prov.data_dir() / "convert").iterdir())  # temp files cleaned up
 
 
+def test_a_record_file_bigger_than_the_read_window_keeps_whole_records(api, monkeypatch):
+    module, client = api
+    prov = module._prov
+    for i in range(30):
+        prov.record({"id": f"{i:012x}", "prompt": "x" * 40})
+    size = (prov.data_dir() / prov.FILE_NAME).stat().st_size
+    monkeypatch.setattr(prov, "_TAIL_BYTES", size)  # exactly the file: the first record must survive
+    assert len(prov.read_all()) == 30
+    monkeypatch.setattr(prov, "_TAIL_BYTES", size - 10)  # mid-record start: that partial line is skipped
+    assert len(prov.read_all()) == 29
+
+
 def test_the_bundled_skill_is_registered(loaded):
     manager, _ = loaded
     skills = manager._plugin_skills
     (qualified,) = [k for k in skills if k.endswith(":elevenlabs-sound-design")]
+    # The registered description is what <available_skills> shows: the 60-character rule applies to it.
+    assert len(skills[qualified]["description"]) <= 60 and skills[qualified]["description"].endswith(".")
     text = Path(skills[qualified]["path"]).read_text(encoding="utf-8")
     front = yaml.safe_load(text.split("---", 2)[1])
     assert front["name"] == "elevenlabs-sound-design" and len(front["description"]) <= 60

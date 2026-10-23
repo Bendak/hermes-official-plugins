@@ -68,7 +68,7 @@ export function SoundLibrary({ ctx, refreshSignal }: { ctx: PluginContext; refre
     setError(null)
     void backendIsRemote().then(r => live && setRemote(r))
     ctx
-      .rest<Library>('sounds?limit=1000', { timeoutMs: 20_000 })
+      .rest<Library>('sounds?limit=5000', { timeoutMs: 20_000 })
       .then(d => live && setData(d))
       .catch(err => live && setError(errorText(err)))
     return () => {
@@ -114,6 +114,7 @@ export function SoundLibrary({ ctx, refreshSignal }: { ctx: PluginContext; refre
           <div data-sfx-totals="" style={S.row}>
             <Chip>
               {data.total} sound{data.total === 1 ? '' : 's'}
+              {data.sounds.length < data.total ? ` (newest ${data.sounds.length} listed)` : ''}
             </Chip>
             {KINDS.map(k => {
               const t = data.totals[k]
