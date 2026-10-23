@@ -26,6 +26,7 @@
       "servers": {
         "meshy": {
           "trust": "untrusted",
+          "timeout": 1500,
           "costs": {
             "meshy_text_to_3d": [
               5,
@@ -88,7 +89,7 @@
           "type": "secret",
           "env": "MESHY_API_KEY",
           "label": "Meshy API key",
-          "description": "From meshy.ai → API. Saving it restarts the Meshy tools with the new key."
+          "description": "Create one at meshy.ai/developers/keys (any paid Meshy plan). Saving it restarts the Meshy tools with the new key."
         },
         "show_credits": {
           "type": "bool",
