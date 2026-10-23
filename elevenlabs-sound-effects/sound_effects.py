@@ -17,6 +17,7 @@ from __future__ import annotations
 import datetime
 import json
 import math
+import os
 import re
 import threading
 import uuid
@@ -26,6 +27,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from agent.secret_scope import get_secret
 from tools.registry import tool_error, tool_result
+
+from . import provenance as _provenance
 
 API_KEY_ENV = "ELEVENLABS_API_KEY"
 SETTINGS_KEY = "plugins.entries.elevenlabs-sound-effects.settings"
@@ -77,6 +80,10 @@ SCHEMA = {
             "prompt_influence": {
                 "type": "number", "minimum": 0, "maximum": 1,
                 "description": "0-1: higher follows the prompt more literally, lower varies more. Default 0.3.",
+            },
+            "model": {
+                "type": "string", "enum": list(MODELS),
+                "description": "ElevenLabs model for this sound. Omit to use the user's configured model.",
             },
         },
         "required": ["prompt"],
@@ -241,7 +248,7 @@ def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "sound"
 
 
-def _save(audio: bytes, prompt: str, output_format: str) -> str:
+def _save(audio: bytes, prompt: str, output_format: str, sound_id: str) -> str:
     """Write under ``cache/generated/audio``: outside the transient caches the gateway sweeps, and
     inside the roots it delivers ``MEDIA:`` files from. Resolved per call (multiplexed profiles)."""
     from hermes_constants import get_hermes_home
@@ -249,12 +256,12 @@ def _save(audio: bytes, prompt: str, output_format: str) -> str:
     directory = get_hermes_home() / "cache" / "generated" / "audio"
     directory.mkdir(parents=True, exist_ok=True)
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    path = directory / f"sfx_{_slug(prompt)}_{stamp}_{uuid.uuid4().hex[:8]}.{FORMATS[output_format]}"
+    path = directory / f"sfx_{_slug(prompt)}_{stamp}_{sound_id}.{FORMATS[output_format]}"
     path.write_bytes(audio)
     return str(path)
 
 
-def generate(args: dict, settings: Callable[[str], Any]) -> str:
+def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -> str:
     import httpx
 
     api_key = (get_secret(API_KEY_ENV, "") or "").strip()
@@ -265,6 +272,10 @@ def generate(args: dict, settings: Callable[[str], Any]) -> str:
         return tool_error(f"{API_KEY_ENV} contains characters an API key cannot have; re-enter the key.")
     try:
         model, output_format, base_url = read_settings(settings)
+        if args.get("model") not in (None, ""):
+            if args["model"] not in MODELS:
+                raise ValueError(f"model must be one of {', '.join(MODELS)} (got {args['model']!r})")
+            model = args["model"]
         body = build_request(args, model)
     except ValueError as exc:
         return tool_error(str(exc))
@@ -278,12 +289,19 @@ def generate(args: dict, settings: Callable[[str], Any]) -> str:
         return tool_error(_api_error(status, audio, reason))
     if not audio:
         return tool_error("ElevenLabs returned an empty audio response")
-    path = _save(audio, body["text"], output_format)
+    sound_id = uuid.uuid4().hex[:12]
+    path = _save(audio, body["text"], output_format, sound_id)
     result = {
-        "success": True, "file_path": path, "media_tag": f"MEDIA:{path}",
+        "success": True, "file_path": path, "media_tag": f"MEDIA:{path}", "sound_id": sound_id,
         "model": model, "output_format": output_format, "loop": body["loop"],
         "duration_seconds": body.get("duration_seconds"), "bytes": len(audio),
     }
     if cost := headers.get("character-cost"):
         result["billed_characters"] = cost
+    _provenance.record({
+        "id": sound_id, "prompt": body["text"], "duration_seconds": body.get("duration_seconds"),
+        "loop": body["loop"], "prompt_influence": body.get("prompt_influence"), "model": model,
+        "output_format": output_format, "file_name": os.path.basename(path), "bytes": len(audio),
+        "billed_characters": result.get("billed_characters"), "session_id": session_id or None,
+    })
     return tool_result(result)
