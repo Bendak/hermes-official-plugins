@@ -1,4 +1,7 @@
 /** Gallery decisions shared by the list and provenance navigation. No network or rendering. */
+import { bestForTask } from './formats.ts'
+import type { Locality } from './scope.ts'
+
 export interface RemoteAsset {
   task_id: string
   task_type: string
@@ -26,6 +29,8 @@ export interface LocalFile {
   task?: null | string
   /** What made it (its prompt, the nearest ancestor's, or its source image), when recorded. */
   prompt?: null | string
+  /** Backend's answer: the viewer can draw it (a format three.js loads, under the size cap). */
+  viewable?: boolean
 }
 
 export type Source =
@@ -88,9 +93,14 @@ export function reconcileSelection(
     ? saved.find(source => source.kind === 'file' && source.path === selected.path && source.task === task)
     : undefined
   if (explicit) return exact || selected
-  const local = exact || saved.find(source => source.task === task)
+  const local = exact || bestForTask(saved.filter((source): source is Extract<Source, { kind: 'file' }> => source.kind === 'file'), task)
   const asset = remote.find(row => row.task_id === task)
   return local || (asset && sourceForAsset(asset)) || (selected?.kind === 'file' ? selected : null)
+}
+
+/** The saved file a task opens from the list: its GLB before an FBX/STL saved later (formats.ts). */
+export function bestLocalForTask(files: readonly LocalFile[], task: string): LocalFile | undefined {
+  return bestForTask(files, task)
 }
 
 export function matchesKind(filter: 'all' | 'image' | 'model', kind: 'image' | 'model'): boolean {
@@ -141,4 +151,12 @@ export function imageNextActions(task: string, source: Source, imageIndex = 0) {
     ...row,
     message: `Meshy image task ${task}: ${row.message} ${row.reference} Quote the credit cost for the chosen settings and ask for my approval before generating.`
   }))
+}
+
+/** The saved-files heading. Those files are on the backend's machine, which is this computer only for a
+ *  local backend; an older Desktop that cannot say gets a heading that is true either way. */
+export function localHeading(locality?: Locality): string {
+  if (locality?.kind === 'local') return 'On this machine'
+  if (locality?.kind === 'remote') return `On ${locality.label || 'the Hermes host'}`
+  return 'Saved files'
 }

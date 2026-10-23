@@ -16,9 +16,13 @@ import type { HermesPlugin, PaletteContribution } from '@hermes/plugin-sdk'
 import { host, PALETTE_AREA, STATUSBAR_AREAS, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 
+import { PICKABLE_EXTENSIONS } from './formats.ts'
 import { createProgressTracker, isMeshyCall, ProgressChip, type ProgressState } from './progress.tsx'
 import { createProvenanceWriter, creationsFrom } from './provenance.ts'
-import { type Balance, BalanceChip, DEFAULT_SETTINGS, Gallery, type MeshySettings, type Source, TranscriptCard } from './views.tsx'
+import { createLocalityTracker, type Locality, locatingOs, scopeKey, watchScope } from './scope.ts'
+import { type Balance, createStatusStore, type MeshySettings } from './status.ts'
+import { uploadModel } from './upload.ts'
+import { BalanceChip, errorText, Gallery, type Source, TranscriptCard } from './views.tsx'
 
 const WORKSPACE_ID = 'meshy-gallery'
 // Settings ▸ Plugins ▸ Meshy is generated from plugin.json's config_schema (agent key `meshy`).
@@ -29,44 +33,51 @@ const plugin: HermesPlugin = {
   name: 'Meshy 3D',
   description: 'View Meshy 3D models inline in chat and in a gallery tab, with your credit balance in the status bar.',
   register(ctx) {
-    let balance: Balance | null = null
-    let settings: MeshySettings = DEFAULT_SETTINGS
-    const listeners = new Set<(b: Balance | null) => void>()
-    const settingsListeners = new Set<(s: MeshySettings) => void>()
+    // Credits + preferences belong to the profile ctx.rest is routed to: the store re-reads them on a
+    // profile/connection switch (status.ts).
+    const status = createStatusStore(ctx.rest, host.state)
+    const refreshBalance = () => void status.refresh()
     const useSettings = () => {
-      const [value, setValue] = useState<MeshySettings>(settings)
-      useEffect(() => {
-        settingsListeners.add(setValue)
-        return () => {
-          settingsListeners.delete(setValue)
-        }
-      }, [])
+      const [value, setValue] = useState<MeshySettings>(status.settings())
+      useEffect(() => status.onSettings(setValue), [])
       return value
     }
+    // Backend paths are the backend machine's: on a remote one, "Show in folder" says where the file is
+    // instead of opening this computer's file manager (scope.ts::locatingOs).
+    const locality = createLocalityTracker(host)
+    const os = locatingOs(ctx.os, locality.get, input => host.notify(input))
     let pendingSource: null | Source = null
     const galleryListeners = new Set<(s: null | Source) => void>()
     let closeWorkspace: (() => void) | null = null
+    let scope = scopeKey(host.state)
+    const scopeListeners = new Set<(key: string) => void>()
 
-    const refreshBalance = () => {
-      ctx
-        .rest<Balance>('status', { timeoutMs: 20_000 })
-        .then(b => {
-          balance = b
-          listeners.forEach(fn => fn(b))
-          if (b.settings) {
-            settings = { ...DEFAULT_SETTINGS, ...b.settings }
-            settingsListeners.forEach(fn => fn(settings))
-          }
-        })
-        .catch(() => undefined) // backend not mounted yet (plugin just enabled) or Meshy down: keep the last value
-    }
+    // A profile or connection switch moves ctx.rest to another backend scope: reload an open gallery (its
+    // lists and selection were the old profile's) and re-check where the backend runs. Older Desktops have
+    // no host.state: nothing fires and the plugin keeps its one fixed backend.
+    ctx.onDispose(
+      watchScope(host.state, key => {
+        scope = key
+        void locality.refresh()
+        pendingSource = null
+        galleryListeners.forEach(fn => fn(null))
+        scopeListeners.forEach(fn => fn(key))
+      })
+    )
+    void locality.refresh()
 
     function GalleryHost() {
       const [source, setSource] = useState<null | Source>(pendingSource)
+      const [where, setWhere] = useState<Locality>(locality.get())
+      const [scoped, setScoped] = useState(scope)
       useEffect(() => {
         galleryListeners.add(setSource)
+        scopeListeners.add(setScoped)
+        const stopLocality = locality.subscribe(setWhere)
         return () => {
           galleryListeners.delete(setSource)
+          scopeListeners.delete(setScoped)
+          stopLocality()
         }
       }, [])
       const prefs = useSettings()
@@ -74,8 +85,10 @@ const plugin: HermesPlugin = {
         <Gallery
           autoRotate={prefs.auto_rotate}
           initial={source}
+          key={scoped}
+          locality={where}
           onOpenSettings={() => host.navigate(SETTINGS_HREF)}
-          os={ctx.os}
+          os={os}
           rest={ctx.rest}
         />
       )
@@ -98,19 +111,52 @@ const plugin: HermesPlugin = {
       })
     }
 
+    // The browser's own file input (a detached element of this plugin, not host DOM): it hands back the
+    // file's bytes, which ctx.os.pickOpenPath (a path) cannot do.
+    const pickAndUpload = () => {
+      const input = document.createElement('input')
+      input.type = 'file'
+      input.accept = PICKABLE_EXTENSIONS.map(ext => `.${ext}`).join(',')
+      input.addEventListener(
+        'change',
+        () => {
+          const file = input.files?.[0]
+          if (!file) {
+            return
+          }
+          const startedIn = scope
+          host.notify({ kind: 'info', message: `Sending ${file.name} to ${locality.get().label || 'the Hermes host'}…` })
+          void file
+            .arrayBuffer()
+            .then(bytes => uploadModel(ctx.rest, { name: file.name, bytes, type: file.type }))
+            .then(saved => {
+              // The path is the old backend's if the user switched profile/connection meanwhile.
+              if (scope !== startedIn) {
+                host.notify({ kind: 'warning', message: `${file.name} was sent before you switched; open it from that profile's gallery` })
+                return
+              }
+              openGallery({ kind: 'file', path: saved.path }, saved.name)
+            })
+            .catch((err: unknown) => host.notify({ kind: 'error', message: `Could not send ${file.name}: ${errorText(err)}` }))
+        },
+        { once: true }
+      )
+      input.click()
+    }
+
     const progressListeners = new Set<(s: ProgressState) => void>()
     // A finished task changes the balance (credits are charged at creation, refunded on failure).
     const progress = createProgressTracker(ctx, s => progressListeners.forEach(fn => fn(s)), refreshBalance)
 
     function Chip() {
       const prefs = useSettings()
-      const [b, setB] = useState<Balance | null>(balance)
+      const [b, setB] = useState<Balance | null>(status.balance())
       const [p, setP] = useState<ProgressState>(progress.get())
       useEffect(() => {
-        listeners.add(setB)
+        const stopBalance = status.onBalance(setB)
         progressListeners.add(setP)
         return () => {
-          listeners.delete(setB)
+          stopBalance()
           progressListeners.delete(setP)
         }
       }, [])
@@ -146,7 +192,7 @@ const plugin: HermesPlugin = {
         <TranscriptCard
           attrs={attrs}
           openInWorkspace={(src, title) => openGallery(src, title)}
-          os={ctx.os}
+          os={os}
           rest={ctx.rest}
           streaming={streaming}
         />
@@ -159,9 +205,9 @@ const plugin: HermesPlugin = {
       closeWorkspace?.()
       progress.dispose()
       progressListeners.clear()
-      listeners.clear()
+      status.dispose()
       galleryListeners.clear()
-      settingsListeners.clear()
+      scopeListeners.clear()
     })
     refreshBalance()
 
@@ -207,11 +253,16 @@ const plugin: HermesPlugin = {
         area: PALETTE_AREA,
         data: {
           id: 'meshy.open-file',
-          label: 'Meshy: view a .glb file…',
-          keywords: ['meshy', '3d', 'glb', 'gltf', 'open', 'file'],
+          label: 'Meshy: view a 3D model file…',
+          keywords: ['meshy', '3d', 'model', 'open', 'file', ...PICKABLE_EXTENSIONS],
           run: () => {
+            // A remote backend cannot open a path on this computer: send the file's bytes instead.
+            if (locality.get().kind === 'remote') {
+              pickAndUpload()
+              return
+            }
             void ctx.os
-              .pickOpenPath({ title: 'Open a 3D model', filters: [{ name: '3D models (.glb, self-contained .gltf)', extensions: ['glb', 'gltf'] }] })
+              .pickOpenPath({ title: 'Open a 3D model', filters: [{ name: '3D models', extensions: [...PICKABLE_EXTENSIONS] }] })
               .then(path => {
                 if (path) {
                   openGallery({ kind: 'file', path }, path.split(/[\\/]/).pop() || 'model')

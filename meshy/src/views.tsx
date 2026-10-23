@@ -18,10 +18,14 @@ import {
 } from '@hermes/plugin-sdk'
 import { type CSSProperties, useCallback, useEffect, useRef, useState } from 'react'
 
+import { canRender, formatOf, mtlLibOf, mtlTextures, siblingPath } from './formats.ts'
+import type { Locality } from './scope.ts'
 import { createStage, dataUrlToBuffer, type ModelStats, type Stage } from './stage.ts'
 import { TaskCard } from './task-card.tsx'
 import {
+  bestLocalForTask,
   imageNextActions,
+  localHeading,
   matchesKind,
   reconcileSelection,
   sourceForAsset,
@@ -41,23 +45,8 @@ export interface FilePayload {
   dataUrl: string
 }
 
-export interface MeshySettings {
-  show_credits: boolean
-  inline_viewer: boolean
-  auto_rotate: boolean
-  gallery_limit: number
-}
-
-/** Mirrors plugin.json's config_schema defaults until the backend answers. */
-export const DEFAULT_SETTINGS: MeshySettings = { show_credits: true, inline_viewer: true, auto_rotate: true, gallery_limit: 24 }
-
-export interface Balance {
-  configured: boolean
-  balance?: number
-  key_env?: string
-  error?: string
-  settings?: Partial<MeshySettings>
-}
+import type { Balance } from './status.ts'
+export { type Balance, DEFAULT_SETTINGS, type MeshySettings } from './status.ts'
 
 // Inline styles with theme variables: no injected <style> tag (nothing global to leak or clean up),
 // and every surface reskins with the active theme.
@@ -173,9 +162,21 @@ function ImageViewer({ rest, source, imageIndex, onImageIndexChange }: { rest: R
 }
 
 function AssetViewer(props: Parameters<typeof ModelViewer>[0] & { imageIndex?: number; onImageIndexChange?: (index: number) => void }) {
-  const { source, rest } = props
+  const { source, rest, os } = props
   if (source.kind === 'remote' && source.expired) {
     return <div role="status" style={V.empty}>This asset’s download link has expired. Open a locally saved copy if you have one.</div>
+  }
+  if (source.kind === 'file' && source.media !== 'image' && !canRender(source.path)) {
+    // Listed so it is findable (and downloadable in other formats), but three.js has no loader for it.
+    return (
+      <div data-meshy-no-preview role="status" style={V.empty}>
+        <Codicon name="file-binary" size={32} />
+        <span>No 3D preview for .{formatOf(source.path) || 'unknown'} files. Open it in the app it was made for.</span>
+        <Button onClick={() => void os.revealPath(source.path)} size="sm" variant="outline">
+          <Codicon name="folder-opened" /> Show in folder
+        </Button>
+      </div>
+    )
   }
   return source.media === 'image'
     ? <ImageViewer key={source.kind === 'file' ? source.path : source.url} rest={rest} source={source} imageIndex={props.imageIndex} onImageIndexChange={props.onImageIndexChange} />
@@ -238,6 +239,30 @@ function ImageDownload({ rest, os, task, source, onSaved }: { rest: Rest; os: Os
   </Button>
 }
 
+/** An OBJ's .mtl (named by its `mtllib` line) and the textures that .mtl names, fetched from beside it
+ *  through the same guarded /file route. Missing companions are fine: the OBJ then renders untextured. */
+async function objCompanions(rest: Rest, path: string, bytes: ArrayBuffer): Promise<Record<string, string>> {
+  const lib = mtlLibOf(new TextDecoder().decode(new Uint8Array(bytes, 0, Math.min(bytes.byteLength, 65_536))))
+  const mtlPath = lib ? siblingPath(path, lib) : null
+  if (!lib || !mtlPath) {
+    return {}
+  }
+  const get = (p: string) => rest<FilePayload>(`file?path=${encodeURIComponent(p)}`, { timeoutMs: 60_000 })
+  const out: Record<string, string> = {}
+  try {
+    out[lib] = (await get(mtlPath)).dataUrl
+  } catch {
+    return {}
+  }
+  for (const tex of mtlTextures(new TextDecoder().decode(dataUrlToBuffer(out[lib])))) {
+    const texPath = siblingPath(path, tex)
+    if (texPath) {
+      await get(texPath).then(r => (out[tex] = r.dataUrl), () => undefined)
+    }
+  }
+  return out
+}
+
 /** One live viewport. Mounting creates a WebGL context; unmounting frees it. */
 export function ModelViewer({
   rest,
@@ -290,7 +315,12 @@ export function ModelViewer({
           return
         }
         setFile({ name: payload.name, bytes: payload.bytes })
-        const s = await stage.load(dataUrlToBuffer(payload.dataUrl))
+        const bytes = dataUrlToBuffer(payload.dataUrl)
+        const siblings = source.kind === 'file' && formatOf(source.path) === 'obj' ? await objCompanions(rest, source.path, bytes) : {}
+        if (!live) {
+          return
+        }
+        const s = await stage.load(bytes, { name: payload.name || (source.kind === 'file' ? source.path : source.url), siblings })
         if (live) {
           setStats(s)
           setState({ phase: 'ready' })
@@ -883,12 +913,15 @@ export function Gallery({
   initial,
   autoRotate,
   onOpenSettings,
+  locality
 }: {
   rest: Rest
   os: Os
   initial: null | Source
   autoRotate: boolean
   onOpenSettings: () => void
+  /** Where the backend runs. Its files are on THAT machine: the list heading names it. */
+  locality?: Locality
 }) {
   const [selected, setSelected] = useState<null | Source>(initial)
   const explicitSelection = useRef(Boolean(initial))
@@ -948,7 +981,7 @@ export function Gallery({
   }, [remote, local, selTask, initial])
 
   const pickTask = (task: string) => {
-    const f = local?.find(x => x.task === task)
+    const f = local ? bestLocalForTask(local, task) : undefined
     if (f) {
       explicitSelection.current = false
       setSelected(sourceForLocalFile(f))
@@ -1009,7 +1042,7 @@ export function Gallery({
             </div>
           )}
           {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
-          {local && local.some(f => matchesKind(filter, f.kind || 'model')) && <div style={V.section}>On this machine</div>}
+          {local && local.some(f => matchesKind(filter, f.kind || 'model')) && <div data-meshy-local-heading style={V.section}>{localHeading(locality)}</div>}
           {local?.filter(f => matchesKind(filter, f.kind || 'model') && matches(f.prompt, f.name, f.project)).map(f => {
             const s = sourceForLocalFile(f)
             const pickLocal = () => {
@@ -1017,14 +1050,16 @@ export function Gallery({
               setSelected(s)
               setSelTask(f.task ? { task: f.task, title: f.name } : null)
             }
+            const viewable = f.kind === 'image' || (f.viewable ?? canRender(f.path))
             return (
-              <button data-meshy-item style={isSel(s) ? { ...V.item, ...V.itemOn } : V.item} key={f.path} onClick={pickLocal} title={f.path} type="button">
-                <Codicon name="file-binary" />
+              <button data-meshy-item data-meshy-format={f.kind === 'image' ? 'image' : formatOf(f.path)} style={isSel(s) ? { ...V.item, ...V.itemOn } : V.item} key={f.path} onClick={pickLocal} title={f.path} type="button">
+                <Codicon name={f.kind === 'image' ? 'file-media' : viewable ? 'symbol-misc' : 'file-binary'} />
                 <span style={V.itemText}>
                   <span style={V.ellipsis}>{f.prompt || f.name}</span>
                   <small style={{ ...V.itemSub, ...V.ellipsis }}>
                     {f.prompt ? `${f.name} · ` : ''}
                     {f.project} · {fmtBytes(f.bytes)}
+                    {viewable ? '' : ' · no 3D preview'}
                   </small>
                 </span>
               </button>
