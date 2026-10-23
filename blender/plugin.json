@@ -1,7 +1,7 @@
 {
   "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
   "name": "blender",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Connect Hermes to the official Blender Lab MCP server and load a Blender workflow skill. Blender 5.1+ must be installed (the install is refused without it); its MCP add-on must be configured separately.",
   "author": {
     "name": "Nous Research"
