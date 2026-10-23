@@ -278,6 +278,9 @@ async function cdpConnect(chromeBin, profileDir, size) {
   const args = ['--headless=new', '--no-sandbox', '--no-first-run', '--no-default-browser-check', '--disable-extensions',
     '--use-angle=swiftshader', '--enable-unsafe-swiftshader', '--ignore-gpu-blocklist', '--mute-audio',
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--hide-scrollbars',
+    // A fresh profile asks the desktop keyring for its cookie key at startup: on KDE that D-Bus call to
+    // kwallet can block until the start timeout. The page stores nothing, so keep keys local.
+    '--password-store=basic', ...(process.platform === 'darwin' ? ['--use-mock-keychain'] : []),
     `--window-size=${size},${size}`, `--user-data-dir=${profileDir}`, '--remote-debugging-port=0', 'about:blank']
   // Chromium gets a private TMPDIR, removed with it (a SIGKILLed browser leaves its
   // org.chromium.* dirs behind). Kept short: Chromium puts its singleton unix socket there and
