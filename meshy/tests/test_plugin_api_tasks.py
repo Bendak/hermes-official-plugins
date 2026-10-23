@@ -401,3 +401,14 @@ def test_a_task_with_only_a_blend_still_offers_its_download(api, meshy):
     task = meshy.add("convert", 13, model_urls={"blend": _asset(meshy, "m.blend")})
     got = api.task_state(task)
     assert (got["has_model"], got["has_files"]) == (False, True)
+
+
+def test_a_plan_gated_route_never_turns_an_unknown_task_into_a_refusal(api, meshy):
+    # One product route 403s for every id (the plan lacks it); a deleted task is still "no such task", cached.
+    unknown = _tid(14)
+    meshy.overrides = {f"/openapi/v1/print/repair/{unknown}": (403, {}, b'{"message": "plan lacks endpoint"}')}
+    assert "/openapi/v1/print/repair" in _ROUTES.values()
+    assert _status(api.task_state, unknown).status_code == 404
+    meshy.server.hits.clear()
+    assert _status(api.task_state, unknown).status_code == 404
+    assert meshy.meshy_hits() == []

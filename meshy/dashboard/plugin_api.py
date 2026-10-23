@@ -686,20 +686,21 @@ def _task(task_id: str, key: str) -> dict:
     elif missed:
         raise HTTPException(status_code=404, detail="Meshy has no finished task with that id")
     probe = [_TASK_ROUTES[t] for t in _PROBE_FIRST]
-    errors = []
+    refused = []  # every plan reads the generic routes, so their refusal is about the key or the account
     for route in probe:
         try:
             row = _task_at(route, task_id, key)
         except HTTPException as exc:
             if exc.status_code != 403 or exc.detail == "Meshy rejected the API key":
                 raise
-            errors.append(exc)  # one route refused (plan-gated?): the task may still be on another
+            refused.append(exc)  # the task may still be on its own route
             continue
         if row is not None:
             row, route = _owned(row, route, task_id, key)
             _remember(slot, route)
             return row
     rest = [r for r in dict.fromkeys(_TASK_ROUTES.values()) if r not in probe]
+    errors = []
     for route, found in zip(rest, _fan_out(lambda r: _task_at(r, task_id, key), rest)):
         try:
             row = found.result()
@@ -710,8 +711,11 @@ def _task(task_id: str, key: str) -> dict:
             row, route = _owned(row, route, task_id, key)
             _remember(slot, route)
             return row
-    if errors:  # never remembered as a miss; an outage (retried) outranks a refusal (the card stops)
-        raise next((e for e in errors if e.status_code >= 500), errors[0])
+    # An outage (the card retries) outranks a refusal (the card stops); neither is remembered as a miss. A
+    # refusal only on other routes is a plan-gated product, not this task: "no such task" as before.
+    outage = next((e for e in errors if e.status_code >= 500), None)
+    if outage or refused:
+        raise outage or refused[0]
     _remember(slot, None)
     raise HTTPException(status_code=404, detail="Meshy has no finished task with that id")
 
@@ -990,7 +994,7 @@ def task_state(task: str):
         "thumbnail": row.get("thumbnail_url") if isinstance(row.get("thumbnail_url"), str) else None,
         "credits": row.get("consumed_credits"),
         "has_model": view is not None, "view_format": view,
-        "has_files": any(":" not in k for k in urls),  # e.g. a Convert-to-BLEND task: downloadable, not viewable
+        "has_files": any(k in _FORMAT_ORDER for k in urls),  # e.g. a Convert-to-BLEND task: downloadable, not viewable
         "error": (str(error.get("message") or "") or status.lower()) if status in _TERMINAL_FAILED else None,
     }
 
