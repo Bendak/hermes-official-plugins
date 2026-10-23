@@ -128,7 +128,7 @@ plus `ffmpeg`/`ffprobe` on PATH) when a sound needs processing:
 python3 sfx_tool.py process in.wav --out out.ogg --trim --loudness -16 --fade-ms 10   # one-shot: trim + normalise + fade + convert
 python3 sfx_tool.py process loop.mp3 --out loop.ogg                                   # plain conversion keeps a loop's edges
 python3 sfx_tool.py loopfix loop.wav --out fixed.wav                                  # crossfade the seam
-python3 sfx_tool.py loopcheck fixed.wav                                               # seamless | click | gap
+python3 sfx_tool.py loopcheck fixed.wav                                               # seamless | click (+ a note when the seam dips)
 python3 sfx_tool.py pack a.mp3 b.mp3 --name "UI pack" --out-dir . --format ogg # folder + manifest.json + zip
 ```
 

@@ -68,11 +68,11 @@ Keep one sound per call. For a set, make one call per sound with a consistent st
   `duration_seconds` = bar length + crossfade (e.g. 2.687 s for one 90 BPM bar and a 20 ms crossfade)
   so the fixed loop lands exactly on the bar.
 - Verify the seam before calling it seamless: run `loopcheck` (below) on the file you deliver and report
-  its verdict (`seamless`, `click` or `gap`).
+  its verdict (`seamless` or `click`). When it adds a `dip_note`, pass that on as a thing to listen
+  for; it is not a failure and never a reason to regenerate on its own.
 - A loop flagged `click`: run `loopfix` (crossfades the end into the start, 20 ms by default), then
-  `loopcheck` the result; or regenerate. Never "fix" a loop with `process --fade-ms`: fades dip to
-  silence at every repeat (`loopcheck` reports that as `gap`). A `gap` on a sound that was not faded
-  means the generated audio itself drops out at the seam: run `loopfix`, or regenerate.
+  `loopcheck` the result. Never "fix" a loop with `process --fade-ms`: fades dip to silence at every
+  repeat.
 - Never pass `--trim` or `--fade-ms` to `process` for a loop; plain conversion keeps the edges.
 - Lossy OGG/MP3 can add a small edge artifact a WAV does not have: if the converted file checks
   `click` while the WAV is `seamless`, deliver the WAV.
@@ -111,8 +111,9 @@ python3 "${HERMES_SKILL_DIR}/scripts/sfx_tool.py" pack --name NAME --out-dir DIR
 - `loopfix`: crossfade of the loop's last N ms into its first N ms, gain-matched to how alike the two
   segments are; the result is N ms shorter and repeats without a click or a dip. Its JSON reports
   `clipped_samples` (should be 0).
-- `loopcheck`: verdict `seamless`, `click` (the last and first samples jump) or `gap` (the seam fades
-  to near-silence). Report the verdict as measured.
+- `loopcheck`: verdict `seamless` or `click` (the last and first samples jump), plus `seam_dip_db` and,
+  when the level drops sharply at the seam, a `dip_note` (a fade or a cut inside a rest; the samples
+  can't tell which). Report what it measured.
 - `pack`: copies (and converts with `--format`) the files into `DIR/NAME/` with tidy names, writes
   `manifest.json` (file, duration, sample rate, channels, format, and the prompt for each file when
   `--prompts` maps file names to prompts) and `DIR/NAME.zip`. `--force` replaces an earlier pack of

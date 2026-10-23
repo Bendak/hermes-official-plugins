@@ -2,7 +2,7 @@
 """Local post-processing for generated sound effects (stdlib + ffmpeg/ffprobe).
 
 Subcommands: probe, process (trim silence, loudness-normalise, fades, convert), loopfix (crossfade
-a loop's end into its start), loopcheck (seam click/gap check), pack (named folder + manifest.json +
+a loop's end into its start), loopcheck (seam click check, seam dip measurement), pack (named folder + manifest.json +
 zip). Every run prints exactly ONE JSON line on
 stdout, ``{"ok": true, ...}`` or ``{"ok": false, "code": ..., "error": ...}``, and exits 0 or 1. It
 never prints a traceback: ffmpeg missing, a bad input file or bad arguments all come back as that
@@ -254,18 +254,22 @@ def cmd_loopcheck(args) -> dict:
 
     head, tail = rms(samples[:edge]), rms(samples[-edge:])
     level_db = 20 * math.log10(max(head, 1e-6) / max(tail, 1e-6))
-    # A fade to silence at the seam is a dropout on every repeat even though the edge samples match.
-    # Compare the 1 ms either side of the seam with the 20 ms around it, not with the whole file: a loop
-    # cut inside a rest (footsteps, a drum loop with space) is quiet on both scales and is fine.
+    # A level dip at the seam is either a fade (a dropout on every repeat) or a loop cut inside a rest
+    # (fine): the samples can't tell them apart, so it is reported as a measurement with a note, never
+    # as a verdict that would send anyone to regenerate a good loop.
     ms = _LOOP_RATE // 1000
     seam_level = rms(samples[-ms:].tolist() + samples[:ms].tolist())
-    around = rms(samples[-21 * ms:-ms].tolist() + samples[ms:21 * ms].tolist())
-    gap = around > 0.01 and seam_level < around * 0.1
+    around = rms(samples[-200 * ms:].tolist() + samples[:200 * ms].tolist())
+    dip_db = 20 * math.log10(max(seam_level, 1e-6) / max(around, 1e-6)) if around > 0.005 else 0.0
     click = seam > max(2 * typical, 0.02) or abs(level_db) > 6
-    verdict = "gap" if gap else "click" if click else "seamless"
+    verdict = "click" if click else "seamless"
     result = {"ok": True, "file": str(src), "verdict": verdict,
               "seam_jump": round(seam, 4), "typical_step_p99": round(typical, 4),
-              "edge_level_difference_db": round(level_db, 1), "duration_seconds": round(len(samples) / _LOOP_RATE, 3)}
+              "edge_level_difference_db": round(level_db, 1), "seam_dip_db": round(dip_db, 1),
+              "duration_seconds": round(len(samples) / _LOOP_RATE, 3)}
+    if dip_db < -20:
+        result["dip_note"] = ("the level drops sharply at the seam: a fade there is a dropout on every repeat, "
+                              "a cut inside a rest is fine; listen before changing it")
     if src.suffix.lower() == ".mp3":
         result["note"] = ("MP3 decoders add encoder padding at the start; convert the loop to .ogg or .wav "
                           "for engine playback and check that file")
@@ -330,7 +334,15 @@ def cmd_pack(args) -> dict:
                 shutil.rmtree(old, ignore_errors=True)
                 raise Failure("bad_input", f"could not replace {folder} (is a file in it open?): {exc.strerror or exc}") from None
         os.replace(staging, folder)
-        os.replace(tmp_zip, zip_path)  # replaces a symlink itself, never its target
+        try:
+            os.replace(tmp_zip, zip_path)  # replaces a symlink itself, never its target
+        except OSError as exc:
+            # Put the old pack back so folder and zip still agree.
+            os.replace(folder, staging)
+            if old is not None:
+                os.replace(old / name, folder)
+                shutil.rmtree(old, ignore_errors=True)
+            raise Failure("bad_input", f"could not replace {zip_path} (is it open?): {exc.strerror or exc}") from None
         tmp_zip = None
         if old is not None:
             shutil.rmtree(old, ignore_errors=True)  # never follows links out; a locked leftover is only hidden clutter
@@ -391,7 +403,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--crossfade-ms", type=float, default=20.0, help="crossfade length, milliseconds (default 20)")
     p.add_argument("--force", action="store_true", help="replace an existing output file")
     p.set_defaults(fn=cmd_loopfix)
-    p = sub.add_parser("loopcheck", help="check a loop's seam for a click or a gap")
+    p = sub.add_parser("loopcheck", help="check a loop's seam for a click; measure any level dip")
     p.add_argument("input")
     p.set_defaults(fn=cmd_loopcheck)
     p = sub.add_parser("pack", help="named folder + manifest.json + zip")

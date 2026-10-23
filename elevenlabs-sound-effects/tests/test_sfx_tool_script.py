@@ -100,7 +100,7 @@ def test_loopcheck_tells_a_clean_seam_from_a_click(tmp_path):
 
 
 @needs_ffmpeg
-def test_loopfix_removes_the_click_and_fades_are_reported_as_a_gap(tmp_path):
+def test_loopfix_removes_the_click_and_a_faded_seam_is_flagged(tmp_path):
     clicky = tone(tmp_path / "click.wav", 1.0 + 25 / 48000, 480)
     fixed = tmp_path / "fixed.wav"
     code, out = run("loopfix", str(clicky), "--out", str(fixed), "--crossfade-ms", "20")
@@ -109,7 +109,8 @@ def test_loopfix_removes_the_click_and_fades_are_reported_as_a_gap(tmp_path):
     assert run("loopcheck", str(fixed))[1]["verdict"] == "seamless"
     faded = tmp_path / "faded.wav"
     assert run("process", str(clicky), "--out", str(faded), "--fade-ms", "8")[0] == 0
-    assert run("loopcheck", str(faded))[1]["verdict"] == "gap"
+    faded_check = run("loopcheck", str(faded))[1]
+    assert faded_check["seam_dip_db"] < -20 and "dip_note" in faded_check
     assert run("process", str(clicky), "--out", str(tmp_path / "x.opus"), "--loudness", "-16")[0] == 0  # 48 kHz forced
     # A loud tonal loop keeps its level through the seam (no equal-power bump into clipping).
     hot = tmp_path / "hot.wav"
@@ -123,7 +124,7 @@ def test_loopfix_removes_the_click_and_fades_are_reported_as_a_gap(tmp_path):
 
 
 @needs_ffmpeg
-def test_a_loop_cut_inside_a_rest_is_not_a_gap(tmp_path):
+def test_a_loop_cut_inside_a_rest_is_seamless(tmp_path):
     rate, frames = 48000, []
     for i in range(rate):  # four short tone bursts per second with silence around each
         phase = i % (rate // 4)
