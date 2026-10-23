@@ -484,7 +484,8 @@ def test_a_beside_export_is_reused_only_for_the_task_that_saved_it(api, monkeypa
     assert {"format": "stl", "saved": str(saved)} in api.formats(new, beside=str(anchor))["formats"]
     api.save({"task": new, "format": "stl", "beside": str(anchor)})
     assert hits["new.stl"] == 1  # this task's own export is reused
-    assert [f["name"] for f in api.local(limit=50)["files"]] == []  # exports are indexed, not gallery models
+    # Every saved format is a gallery model, listed under the task that saved it last (the regenerated one).
+    assert [(f["name"], f["task"]) for f in api.local(limit=50)["files"]] == [("robot.stl", new)]
 
     # A sibling Hermes never saved is the user's: never overwritten. The card's own model is this task's file.
     tank = anchor.with_name("tank.glb")

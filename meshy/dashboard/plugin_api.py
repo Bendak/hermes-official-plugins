@@ -10,8 +10,12 @@ Routes:
     GET /models?limit=      recent finished Meshy generations: task id, type, prompt, thumbnail, credits
     GET /local?limit=       .glb files under the plugin's meshy_output/ (the server's default download dir),
                             plus models in the asset index (project folders), each with its Meshy task id when known
-    GET /file?path=&task=   bytes of one .glb/.gltf/.png/.jpg (data URL), refused outside allowed roots;
-                            a served model is recorded in the profile's asset index (path, size, sha256, task)
+    GET /file?path=&task=   bytes of one model (.glb/.gltf/.fbx/.obj/.stl/.usdz/.3mf), an OBJ's .mtl, or an image
+                            (data URL), refused outside allowed roots; a served model is recorded in the
+                            profile's asset index (path, size, sha256, task)
+    POST /upload            a model file sent from the Desktop's own computer (multipart ``file``, or JSON
+                            ``{filename, data: base64}`` from older Desktops): stored under the plugin's
+                            uploads/ so a REMOTE backend can show a file it cannot open by path
     GET /formats?task=      the file types a finished task offers (glb, fbx, obj, stl, usdz ...) + any already saved
     POST /save              {task, format, beside?}: download one format next to ``beside`` (no credits)
     GET /task?task=         one task's status + progress % + thumbnail, for a card given only a task id: it shows
@@ -41,7 +45,8 @@ import urllib.parse
 import urllib.request
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi.concurrency import run_in_threadpool
 
 _log = logging.getLogger(__name__)
 router = APIRouter()
@@ -50,7 +55,11 @@ _API = "https://api.meshy.ai"
 _KEY_ENV = "MESHY_API_KEY"
 # A Meshy GLB with 2K textures is ~30 MB; the cap leaves room for 4K/8K while bounding memory.
 _MAX_FILE_BYTES = 128 * 1024 * 1024
-_MIME = {".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".png": "image/png",
+# Every format Meshy exports that three.js can draw (the viewer picks the loader by extension).
+_MODEL_MIME = {".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".fbx": "application/octet-stream",
+               ".obj": "model/obj", ".stl": "model/stl", ".usdz": "model/vnd.usdz+zip", ".3mf": "model/3mf"}
+# What /file serves: models, an OBJ's material file, and images (thumbnails, saved image sets, OBJ textures).
+_MIME = {**_MODEL_MIME, ".mtl": "text/plain", ".png": "image/png",
          ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
 # Model types the list endpoints serve, newest-first per type; merged and re-sorted below.
 _MODEL_ENDPOINTS = (("text-to-3d", "/openapi/v2/text-to-3d"), ("image-to-3d", "/openapi/v1/image-to-3d"),
@@ -142,7 +151,7 @@ def _allowed_roots() -> list[Path]:
     return [r.resolve() for r in roots if r.exists()]
 
 
-def _resolve_readable(raw: str) -> Path:
+def _resolve_readable(raw: str, *, exts=_MIME, max_bytes: int | None = _MAX_FILE_BYTES) -> Path:
     if not raw or "\x00" in raw:
         raise HTTPException(status_code=400, detail="path required")
     target = Path(os.path.expanduser(raw))
@@ -152,13 +161,13 @@ def _resolve_readable(raw: str) -> Path:
         resolved = target.resolve(strict=True)
     except (OSError, RuntimeError):
         raise HTTPException(status_code=404, detail="file not found") from None
-    if resolved.suffix.lower() not in _MIME:
-        raise HTTPException(status_code=415, detail="only .glb, .gltf and image files")
+    if resolved.suffix.lower() not in exts:
+        raise HTTPException(status_code=415, detail="only 3D model and image files")
     if not any(resolved.is_relative_to(root) for root in _allowed_roots()):
         raise HTTPException(status_code=403, detail="outside the allowed folders")
     if not resolved.is_file():
         raise HTTPException(status_code=404, detail="file not found")
-    if resolved.stat().st_size > _MAX_FILE_BYTES:
+    if max_bytes is not None and resolved.stat().st_size > max_bytes:
         raise HTTPException(status_code=413, detail="file too large for the viewer")
     return resolved
 
@@ -250,7 +259,8 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
 # a provider URL or a key. Capped; vanished files drop out on read.
 _INDEX_NAME = "asset-index.json"
 _INDEX_CAP = 500
-_INDEXED = (".glb", ".gltf")
+# Gallery models: every viewable format, plus BLEND (listed with a plain tile; three.js cannot draw it).
+_INDEXED = (*_MODEL_MIME, ".blend")
 
 
 def _index_path() -> Path:
@@ -314,19 +324,24 @@ def local(limit: int = Query(50, ge=1, le=200)):
     """meshy_output/ downloads plus indexed models that still exist, deduped by resolved path."""
     out_dir = _data_root() / "meshy_output"
     seen: dict[str, dict] = {}
-    for p in out_dir.rglob("*.glb") if out_dir.is_dir() else ():
+    for p in out_dir.rglob("*") if out_dir.is_dir() else ():
+        if p.suffix.lower() not in _INDEXED:
+            continue
         try:
             st = p.stat()
         except OSError:  # a dangling link, or deleted since the scan
             continue
+        if not p.is_file():
+            continue
         seen[str(p.resolve())] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
-                                  "modified": int(st.st_mtime * 1000), "task": _local_task(p)}
+                                  "modified": int(st.st_mtime * 1000), "task": _local_task(p),
+                                  "viewable": _viewable(p, st.st_size)}
     for item in _saved_images():
         seen[item["path"]] = item
     for row in _load_index():
         p = Path(row["path"])
         if p.suffix.lower() not in _INDEXED:
-            continue  # an FBX/STL/OBJ /save wrote: indexed for its task, not a gallery model
+            continue  # an OBJ's .mtl/texture /save wrote: indexed for its task, not a gallery model
         if str(p) in seen or not p.is_file():
             if str(p) in seen and not seen[str(p)]["task"] and row.get("task_id"):
                 seen[str(p)]["task"] = row["task_id"]
@@ -337,12 +352,18 @@ def local(limit: int = Query(50, ge=1, le=200)):
             continue
         seen[str(p)] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
                         "modified": max(int(st.st_mtime * 1000), int(row.get("last_opened") or 0)),
-                        "task": row.get("task_id") if isinstance(row.get("task_id"), str) else None}
+                        "task": row.get("task_id") if isinstance(row.get("task_id"), str) else None,
+                        "viewable": _viewable(p, st.st_size)}
     files = sorted(seen.values(), key=lambda f: f["modified"], reverse=True)[:limit]
     prov = _load_prov()
     for f in files:
         f["prompt"] = f.get("prompt") or (_label_for(f["task"], prov) if f["task"] else None) or _project_prompt(Path(f["path"]))
     return {"dir": str(out_dir), "files": files}
+
+
+def _viewable(path: Path, size: int) -> bool:
+    """The viewer can draw it: a format three.js loads, small enough for /file."""
+    return path.suffix.lower() in _MODEL_MIME and size <= _MAX_FILE_BYTES
 
 
 def _project_prompt(model: Path) -> str | None:
@@ -1035,13 +1056,14 @@ def _saved_assets_root() -> Path:
 def storage():
     # Count known files once, including companion textures and copies saved by the MCP server.
     paths = set()
-    for folder in (_saved_assets_root(), _data_root() / "meshy_output"):
+    for folder in (_saved_assets_root(), _data_root() / "meshy_output", _data_root() / _UPLOAD_DIR):
         for path in folder.rglob("*") if folder.is_dir() else ():
             if path.is_file() and not path.is_symlink() and path.suffix != ".part":
                 paths.add(path.resolve())
     for row in _load_index():
         try:
-            paths.add(_resolve_readable(row["path"]))
+            # Every saved format counts (BLEND too), at any size: the total is disk use, not what the viewer opens.
+            paths.add(_resolve_readable(row["path"], exts=_COUNTED, max_bytes=None))
         except HTTPException:
             continue
     sizes = []
@@ -1051,6 +1073,9 @@ def storage():
         except OSError:
             continue
     return {"bytes": sum(sizes), "files": len(sizes), "directory": str(_data_root())}
+
+
+_COUNTED = frozenset((*_MIME, *_INDEXED))
 
 
 _IMAGE_SAVE_LOCKS: dict[str, threading.Lock] = {}  # one per task: unrelated sets download in parallel
@@ -1136,3 +1161,104 @@ def _saved_images() -> list[dict]:
         except (OSError, ValueError, AttributeError, TypeError):
             continue
     return out
+
+
+# --- /upload: "View a model file" against a remote backend --------------------------------------------------
+# The picked file is on the Desktop's computer; a remote backend cannot open that path, so the renderer
+# sends the bytes. Stored content-addressed under the plugin's data dir (a re-send reuses the file) and
+# recorded in the asset index, so it shows in the gallery like any other saved model.
+_UPLOAD_DIR = "uploads"
+_UPLOAD_NAME = re.compile(r"[^A-Za-z0-9._-]+")
+# Older Desktops send base64 inside JSON: a third larger than the file, plus the envelope.
+_MAX_UPLOAD_BODY = _MAX_FILE_BYTES * 4 // 3 + 64 * 1024
+
+
+def _multipart_file(body: bytes, content_type: str) -> tuple[str, bytes] | None:
+    """The first file part of a multipart/form-data body (Desktop sends exactly one, field ``file``)."""
+    match = re.search(r'boundary="?([^";]+)"?', content_type)
+    if not match:
+        return None
+    delim = b"--" + match.group(1).encode("latin-1")
+    start = body.find(delim)
+    while start != -1:
+        head_start = start + len(delim)
+        if body[head_start:head_start + 2] == b"--":
+            return None  # closing delimiter: no file part
+        head_end = body.find(b"\r\n\r\n", head_start)
+        if head_end == -1:
+            return None
+        headers = body[head_start:head_end].decode("utf-8", "replace")
+        data_start = head_end + 4
+        nxt = body.find(b"\r\n" + delim, data_start)
+        if nxt == -1:
+            return None
+        name = re.search(r'filename="([^"]*)"', headers)
+        if name:
+            return name.group(1), body[data_start:nxt]
+        start = nxt + 2
+    return None
+
+
+def _json_file(body: bytes) -> tuple[str, bytes] | None:
+    try:
+        doc = json.loads(body)
+    except ValueError:
+        return None
+    if not isinstance(doc, dict) or not isinstance(doc.get("filename"), str) or not isinstance(doc.get("data"), str):
+        return None
+    try:
+        return doc["filename"], base64.b64decode(doc["data"], validate=True)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="file data is not valid base64") from None
+
+
+def _store_upload(filename: str, data: bytes) -> dict:
+    name = _UPLOAD_NAME.sub("_", filename.replace("\\", "/").rsplit("/", 1)[-1]).strip("._ ")[-80:] or "model"
+    if Path(name).suffix.lower() not in _MODEL_MIME:
+        raise HTTPException(status_code=415, detail="only .glb, .gltf, .fbx, .obj, .stl, .usdz and .3mf models")
+    if not data:
+        raise HTTPException(status_code=400, detail="the file is empty")
+    if len(data) > _MAX_FILE_BYTES:
+        raise HTTPException(status_code=413, detail="file too large for the viewer")
+    base = _data_root()
+    root = base / _UPLOAD_DIR
+    if root.is_symlink():
+        raise HTTPException(status_code=403, detail="upload folder must not be a symlink")
+    root.mkdir(parents=True, exist_ok=True)
+    if root.resolve() != base.resolve() / _UPLOAD_DIR:
+        raise HTTPException(status_code=403, detail="upload folder must not be a symlink")
+    import hashlib
+    dest = root / f"{hashlib.sha256(data).hexdigest()[:16]}-{name}"
+    if dest.is_symlink():
+        raise HTTPException(status_code=403, detail="upload target must not be a symlink")
+    if not (dest.is_file() and dest.stat().st_size == len(data)):
+        fd, part = _staging(dest)
+        try:
+            with open(fd, "wb") as out:
+                out.write(data)
+            os.replace(part, dest)
+        finally:
+            part.unlink(missing_ok=True)
+    _record_asset(dest)
+    return {"path": str(dest), "name": name, "bytes": len(data)}
+
+
+@router.post("/upload")
+async def upload(request: Request):
+    declared = request.headers.get("content-length", "")
+    if declared.isdigit() and int(declared) > _MAX_UPLOAD_BODY:
+        raise HTTPException(status_code=413, detail="file too large for the viewer")
+    chunks, size = [], 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > _MAX_UPLOAD_BODY:
+            raise HTTPException(status_code=413, detail="file too large for the viewer")
+        chunks.append(chunk)
+    body = b"".join(chunks)
+    content_type = request.headers.get("content-type", "")
+    got = _multipart_file(body, content_type) if content_type.startswith("multipart/form-data") else _json_file(body) if body.strip() else None
+    if got is None:
+        # An older Desktop drops the multipart option and sends nothing: the renderer reads this exact
+        # phrase as "retry as JSON" (src/upload.ts::uploadUnsupported).
+        raise HTTPException(status_code=400, detail="no file in the request")
+    return await run_in_threadpool(_store_upload, *got)
