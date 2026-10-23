@@ -40,6 +40,8 @@ DEFAULTS = {
     "api_base_url": "https://api.elevenlabs.io",
 }
 MIN_SECONDS, MAX_SECONDS = 0.5, 30.0
+# The API answers a longer description with HTTP 400 (same limit on v2 and v3).
+MAX_PROMPT_CHARS = 450
 _CONNECT_READ_TIMEOUT = 60.0
 _DEADLINE_SECONDS = 180.0
 # 30 s of 48 kHz WAV is ~6 MB; the cap only stops a misbehaving endpoint from filling memory.
@@ -55,14 +57,15 @@ SCHEMA = {
         "Generate a sound effect from a text description with ElevenLabs (up to 30 seconds): foley, "
         "impacts, ambience, UI sounds, creature noises, short musical stingers or drum loops. "
         "Describe the sound concretely (source, material, space, intensity), e.g. 'heavy wooden door "
-        "creaking open in a stone hall'. Returns the saved file path and a MEDIA: line; include that "
+        "creaking open in a stone hall'; at most 450 characters. Returns the saved file path and a MEDIA: line; include that "
         "MEDIA: line in your reply to send the audio to the user. Each call is billed to the user's "
         "ElevenLabs account."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "prompt": {"type": "string", "description": "What the sound effect should sound like."},
+            "prompt": {"type": "string", "maxLength": MAX_PROMPT_CHARS,
+                       "description": "What the sound effect should sound like (at most 450 characters)."},
             "duration_seconds": {
                 "type": "number", "minimum": MIN_SECONDS, "maximum": MAX_SECONDS,
                 "description": "Length in seconds (0.5-30). Omit to let ElevenLabs pick from the prompt.",
@@ -116,6 +119,8 @@ def build_request(args: dict, model: str) -> dict:
     prompt = str(args.get("prompt") or "").strip()
     if not prompt:
         raise ValueError("prompt is required: describe the sound effect to generate")
+    if len(prompt) > MAX_PROMPT_CHARS:
+        raise ValueError(f"prompt is {len(prompt)} characters long; shorten it to at most {MAX_PROMPT_CHARS} characters")
     body: dict[str, Any] = {"text": prompt, "loop": _flag(args.get("loop"), "loop"), "model_id": model}
     duration = _number(args, "duration_seconds", MIN_SECONDS, MAX_SECONDS)
     if duration is not None:
@@ -154,6 +159,18 @@ def _display_url(url: str) -> str:
     return urlunsplit(parts._replace(netloc=f"{host}:{parts.port}" if parts.port else host))
 
 
+_KEYS_URL = "https://elevenlabs.io/app/settings/api-keys"
+# By the ``detail.status`` ElevenLabs sends; a 401 alone can be a bad key, a missing permission or
+# no credits, and each needs a different fix.
+_ERROR_HINTS = {
+    "invalid_api_key": f" (ELEVENLABS_API_KEY is not a valid ElevenLabs key; create one at {_KEYS_URL})",
+    "missing_permissions": f" (enable Sound Effects access for this API key at {_KEYS_URL})",
+    "quota_exceeded": " (the ElevenLabs account is out of credits)",
+}
+_STATUS_HINTS = {401: " (check ELEVENLABS_API_KEY and your plan's remaining credits)",
+                 429: " (rate limited or out of credits; try again later)"}
+
+
 def _api_error(status: int, body: bytes, reason: str) -> str:
     """ElevenLabs errors come as ``{"detail": {"status", "message"}}`` or FastAPI's
     ``{"detail": [{"loc", "msg"}]}``; fall back to the raw body."""
@@ -170,8 +187,7 @@ def _api_error(status: int, body: bytes, reason: str) -> str:
             for item in detail if isinstance(item, dict)) or str(detail)
     else:
         message = body.decode("utf-8", "replace").strip()[:500] or reason
-    hint = {401: " (check ELEVENLABS_API_KEY and your plan's remaining credits)",
-            429: " (rate limited or out of credits; try again later)"}.get(status, "")
+    hint = _ERROR_HINTS.get(detail.get("status") if isinstance(detail, dict) else None) or _STATUS_HINTS.get(status, "")
     return f"ElevenLabs returned HTTP {status}: {message}{hint}"
 
 

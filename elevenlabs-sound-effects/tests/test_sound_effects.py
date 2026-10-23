@@ -235,3 +235,33 @@ def test_slow_server_hits_the_deadline_and_bad_keys_never_leave(loaded, stand_in
         error = call({"prompt": "thunder"})["error"]
         assert "re-enter the key" in error and "SECRETTAIL" not in error
     assert len(stand_ins[0].requests) == 1  # only the deadline case reached the server
+
+
+def _detail(status: str, message: str) -> bytes:
+    """An error body in the shape api.elevenlabs.io sends (captured live)."""
+    return json.dumps({"detail": {"type": "authentication_error", "code": status, "message": message,
+                                  "status": status, "request_id": "0" * 32}}).encode()
+
+
+def test_overlong_prompts_never_leave_and_key_errors_say_which_fix(loaded, stand_ins, monkeypatch):
+    """The live API refuses descriptions over 450 characters (v2 and v3) and answers a bad key, a
+    key without the sound permission and an empty balance with different bodies: the model gets
+    the limit up front and each error names its own fix."""
+    entry, call = loaded
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "xi-test-key")
+    assert entry.schema["parameters"]["properties"]["prompt"]["maxLength"] == 450
+    assert "450 characters" in call({"prompt": "k" * 451})["error"]
+    assert stand_ins[0].requests == []
+    assert call({"prompt": "k" * 450})["success"] is True
+
+    json_type = {"Content-Type": "application/json"}
+    for status, code, message, fix in (
+            (400, "invalid_api_key", "API key is invalid.", "not a valid ElevenLabs key"),
+            (401, "missing_permissions",
+             "The API key you used is missing the permission sound_generation to execute this operation.",
+             "enable Sound Effects access"),
+            (401, "quota_exceeded", "You have 0 credits remaining.", "out of credits")):
+        stand_ins[0].reply = (status, json_type, _detail(code, message))
+        error = call({"prompt": "thunder"})["error"]
+        assert message in error and fix in error, error
+        assert code == "quota_exceeded" or "credits" not in error, error
