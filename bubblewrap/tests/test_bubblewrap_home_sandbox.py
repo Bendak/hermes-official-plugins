@@ -50,6 +50,7 @@ CREDENTIAL_FILES = (
     ".terraform.d/credentials.tfrc.json",
     ".local/share/keyrings/login.keyring",
     ".cache/huggingface/token",
+    ".cache/huggingface/stored_tokens",
     ".gem/credentials",
     ".m2/settings-security.xml",
     ".config/npm/npmrc",
@@ -171,3 +172,32 @@ def test_files_another_session_staged_are_not_visible(home):
     finally:
         env.cleanup()
     assert visible == []
+
+
+def test_a_dotfiles_dir_named_in_home_allow_shows_read_only_and_keeps_its_credentials_hidden(home):
+    """Allowed links into a hidden dotfiles directory resolve once that directory is allowed too."""
+    dotfiles = home / ".dotfiles"
+    (dotfiles / "git").mkdir(parents=True)
+    (dotfiles / "git" / "gitconfig").write_text(f"{VISIBLE} gitconfig\n")
+    (dotfiles / "git" / "credentials").write_text(f"{SECRET} git credentials\n")
+    (home / ".gitconfig").unlink()
+    (home / ".gitconfig").symlink_to(".dotfiles/git/gitconfig")
+    shutil.rmtree(home / ".config" / "git")
+    (home / ".config" / "git").symlink_to(dotfiles / "git")
+    env = _env(home)
+    try:
+        dangling = _read(env, home / ".gitconfig")
+    finally:
+        env.cleanup()
+    env = _env(home, {"home_allow": [".dotfiles"]})
+    try:
+        gitconfig = _read(env, home / ".gitconfig")
+        credentials = _read(env, home / ".config" / "git" / "credentials")
+        written = env.execute(f"echo x >> {home / '.gitconfig'}")["returncode"]
+    finally:
+        env.cleanup()
+    assert VISIBLE not in dangling
+    assert VISIBLE in gitconfig
+    assert SECRET not in credentials
+    assert written != 0
+    assert "x" not in (dotfiles / "git" / "gitconfig").read_text()
