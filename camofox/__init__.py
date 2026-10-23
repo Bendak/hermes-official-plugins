@@ -68,10 +68,11 @@ def register(ctx) -> None:
     ctx.register_tool(name=s.BROWSER_IMPORT_COOKIES["name"], toolset=TOOLSET, schema=s.BROWSER_IMPORT_COOKIES,
                       handler=t.handle_import_cookies, check_fn=t.check_cookie_import_available, emoji="🍪")
 
-    # Core cleaned the task's Camofox session after every turn (cleanup_task_resources); a teardown
-    # without a final turn (CLI quit, /new) still gets one through on_session_finalize.
+    # Core cleaned the task's Camofox session after every turn (cleanup_task_resources), except with
+    # browser.headed on, where someone watches the window; a teardown without a final turn (CLI quit,
+    # /new) still gets one through on_session_finalize.
     def _on_session_end(task_id=None, session_id=None, **_):
-        if task_id or session_id:
+        if (task_id or session_id) and not t.headed_mode():
             t.cleanup_task(task_id or session_id)
 
     def _on_session_finalize(session_id=None, **_):
