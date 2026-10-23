@@ -7,6 +7,7 @@ every refusal below must happen BEFORE the router reaches Meshy, so any urlopen 
 from __future__ import annotations
 
 import importlib.util
+import io
 import json
 import os
 import urllib.error
@@ -34,12 +35,18 @@ def api(tmp_path, monkeypatch):
         raise AssertionError("network call reached before input validation")
 
     monkeypatch.setattr(urllib.request, "urlopen", tripwire)
+    monkeypatch.setattr(urllib.request, "build_opener", tripwire)  # the router's own opener (redirect guard)
     spec = importlib.util.spec_from_file_location("meshy_plugin_api_under_test", _SRC)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     mod.tmp = tmp_path
     mod.data = data
     return mod
+
+
+class _Resp(io.BytesIO):
+    """An asset response as the router reads it: a body and its headers."""
+    headers: dict = {}
 
 
 def _status(fn, *args, **kwargs) -> int:
@@ -104,7 +111,7 @@ def test_asset_failures_never_claim_the_api_key_was_rejected(api, monkeypatch, s
     def fail(*_args, **_kwargs):
         raise urllib.error.HTTPError(url, status, "asset error", {}, None)
 
-    monkeypatch.setattr(urllib.request, "urlopen", fail)
+    monkeypatch.setattr(api, "_open", fail)
     with pytest.raises(HTTPException) as err:
         if operation == "preview":
             api.remote(url)
@@ -352,10 +359,12 @@ def test_image_download_rejects_missing_outputs_and_foreign_hosts_before_writing
 
 
 def test_image_lookup_uses_image_endpoint_response(api, monkeypatch):
+    """A generic route answers reshaped (no images); the record's own route has them."""
     monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
     def get(path, *_a, **_k):
-        assert path.startswith("/openapi/v1/text-to-image/")
-        return {"id": _TASK, "image_urls": ["https://assets.meshy.ai/a.png"]}
+        if path.startswith("/openapi/v1/text-to-image/"):
+            return {"id": _TASK, "type": "text-to-image", "image_urls": ["https://assets.meshy.ai/a.png"]}
+        return {"id": _TASK, "type": "text-to-image"}
     monkeypatch.setattr(api, "_meshy_get", get)
     monkeypatch.setattr(api, "_download", lambda _url, dest: dest.write_bytes(b"image"))
     assert len(api.save_images({"task": _TASK})["paths"]) == 1
@@ -363,7 +372,6 @@ def test_image_lookup_uses_image_endpoint_response(api, monkeypatch):
 
 
 def test_image_download_ignores_preexisting_temporary_symlinks(api, monkeypatch):
-    import io
     monkeypatch.setattr(api, "_api_key", lambda: "offline-test-key")
     monkeypatch.setattr(api, "_task", lambda *_a, **_k: {"image_urls": ["https://assets.meshy.ai/a.png"]})
     folder = api._saved_assets_root() / _TASK
@@ -375,7 +383,7 @@ def test_image_download_ignores_preexisting_temporary_symlinks(api, monkeypatch)
         (folder / "images.json.part").symlink_to(victim)
     except OSError:
         pytest.skip("symlinks unavailable")
-    monkeypatch.setattr(urllib.request, "urlopen", lambda *_a, **_k: io.BytesIO(b"image"))
+    monkeypatch.setattr(api, "_open", lambda *_a, **_k: _Resp(b"image"))
     saved = api.save_images({"task": _TASK})
     assert victim.read_text() == "unchanged"
     assert Path(saved["paths"][0]).read_bytes() == b"image"
@@ -420,22 +428,22 @@ def test_parallel_writes_keep_every_record_and_tasks_get_their_own_folder(api):
 
 def _fake_assets(monkeypatch, api, files: dict[str, bytes | int], delay: float = 0.0) -> dict[str, int]:
     """Serve ``https://assets.meshy.ai/<name>`` from ``files`` (an int = that HTTP error); count each fetch."""
-    import io
     import threading
     import time
     hits: dict[str, int] = {}
     lock = threading.Lock()
 
-    def urlopen(url, timeout=None):
+    def urlopen(url, timeout=None, allowed=None):
+        assert allowed(url)
         name = str(url).rsplit("/", 1)[-1]
         with lock:
             hits[name] = hits.get(name, 0) + 1
         time.sleep(delay)  # long enough for a second request to overlap the first
         if isinstance(files[name], int):
             raise urllib.error.HTTPError(str(url), files[name], "fixture", {}, None)
-        return io.BytesIO(files[name])
+        return _Resp(files[name])
 
-    monkeypatch.setattr(urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(api, "_open", urlopen)
     return hits
 
 
@@ -453,8 +461,7 @@ def test_save_downloads_a_file_once_and_a_retry_finishes_failed_companions(api, 
     assert [s["bytes"] for s in saved] == [3000, 3000] and hits["m.fbx"] == 1
 
     folder = api.data / "meshy_output" / _TASK
-    with pytest.raises(urllib.error.HTTPError):  # the .mtl fetch failed: not reported as saved
-        api.save({"task": _TASK, "format": "obj"})
+    assert _status(api.save, {"task": _TASK, "format": "obj"}) == 502  # the .mtl fetch failed: not reported as saved
     files["m.mtl"] = b"newmtl material\n"
     api.save({"task": _TASK, "format": "obj"})
     assert (folder / "model.mtl").read_text(encoding="utf-8") == "newmtl material\n" and hits["m.mtl"] == 2
