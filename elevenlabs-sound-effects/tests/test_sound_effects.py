@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import shutil
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
@@ -24,7 +25,8 @@ MODELS = {"eleven_text_to_sound_v2", "eleven_text_to_sound_v3"}
 
 
 class StandIn:
-    """Records each request; answers ``reply`` = (status, headers, body bytes)."""
+    """Records each request; answers ``reply`` = (status, headers, body bytes), or calls it with the
+    request handler when it is a function (misbehaving-server scenarios)."""
 
     def __init__(self):
         self.requests: list[dict] = []
@@ -41,6 +43,12 @@ class StandIn:
                            or set(body) - BODY_FIELDS and f"unknown fields {sorted(set(body) - BODY_FIELDS)}"
                            or not isinstance(body.get("text"), str) and "text"
                            or body.get("model_id", "eleven_text_to_sound_v2") not in MODELS and "model_id")
+                if callable(stand_in.reply) and not problem:
+                    try:
+                        stand_in.reply(self)
+                    except (BrokenPipeError, ConnectionResetError):
+                        pass  # the client hung up on purpose
+                    return
                 status, headers, payload = (
                     (422, {"Content-Type": "application/json"},
                      json.dumps({"detail": [{"loc": ["body"], "msg": problem}]}).encode())
@@ -168,7 +176,8 @@ def test_each_profile_gets_its_own_key_settings_and_output_dir(loaded, stand_ins
 
 
 def test_bad_input_never_bills_and_errors_reach_the_model(loaded, stand_ins, monkeypatch, _hermes_home):
-    _, call = loaded
+    entry, call = loaded
+    monkeypatch.setattr(entry.handler.__globals__["_sfx"], "_DEADLINE_SECONDS", 10.0)  # bound the endless body
     monkeypatch.setenv("ELEVENLABS_API_KEY", "xi-test-key")
 
     for args in ({"prompt": "   "}, {"prompt": "thunder", "duration_seconds": 45},
@@ -188,4 +197,40 @@ def test_bad_input_never_bills_and_errors_reach_the_model(loaded, stand_ins, mon
 
     stand_ins[0].reply = (200, {"Content-Type": "audio/mpeg", "Content-Length": str(60 * 1024 * 1024)}, b"x")
     assert "byte cap" in call({"prompt": "thunder"})["error"]
+    stand_ins[0].reply = _endless_chunked_body
+    assert "byte cap" in call({"prompt": "thunder"})["error"]
     assert not list((_hermes_home / "cache" / "generated" / "audio").glob("*"))
+
+
+def _endless_chunked_body(handler) -> None:
+    handler.send_response(200)
+    handler.send_header("Transfer-Encoding", "chunked")
+    handler.end_headers()
+    chunk = b"x" * (1 << 20)
+    while True:
+        handler.wfile.write(b"%x\r\n%s\r\n" % (len(chunk), chunk))
+
+
+def test_slow_server_hits_the_deadline_and_bad_keys_never_leave(loaded, stand_ins, monkeypatch):
+    entry, call = loaded
+    plugin = entry.handler.__globals__["_sfx"]  # the module core's loader imported
+    monkeypatch.setattr(plugin, "_DEADLINE_SECONDS", 1.0)
+
+    def trickle_headers(handler):  # never finishes its status line; only the deadline ends it
+        handler.wfile.write(b"HTTP/1.1 200")
+        for _ in range(100):
+            handler.wfile.write(b" ")
+            handler.wfile.flush()
+            time.sleep(0.1)
+
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "xi-test-key")
+    stand_ins[0].reply = trickle_headers
+    started = time.monotonic()
+    assert "within 1 seconds" in call({"prompt": "thunder"})["error"]
+    assert time.monotonic() - started < 5
+
+    for key in ("xi-key\nSECRETTAIL", "xi-kéy"):
+        monkeypatch.setenv("ELEVENLABS_API_KEY", key)
+        error = call({"prompt": "thunder"})["error"]
+        assert "re-enter the key" in error and "SECRETTAIL" not in error
+    assert len(stand_ins[0].requests) == 1  # only the deadline case reached the server

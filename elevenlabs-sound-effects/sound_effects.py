@@ -18,7 +18,7 @@ import datetime
 import json
 import math
 import re
-import time
+import threading
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -44,6 +44,10 @@ _CONNECT_READ_TIMEOUT = 60.0
 _DEADLINE_SECONDS = 180.0
 # 30 s of 48 kHz WAV is ~6 MB; the cap only stops a misbehaving endpoint from filling memory.
 MAX_AUDIO_BYTES = 50 * 1024 * 1024
+
+
+class ResponseRefused(Exception):
+    """The endpoint answered, but with a body over the size cap or past the deadline."""
 
 SCHEMA = {
     "name": "elevenlabs_sound_effect",
@@ -89,7 +93,7 @@ def _number(args: dict, key: str, low: float, high: float) -> float | None:
         if isinstance(raw, bool):
             raise TypeError
         value = float(raw)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         raise ValueError(f"{key} must be a number between {low:g} and {high:g}") from None
     if not (math.isfinite(value) and low <= value <= high):
         raise ValueError(f"{key} must be between {low:g} and {high:g} (got {raw!r})")
@@ -134,7 +138,11 @@ def read_settings(settings: Callable[[str], Any]) -> tuple[str, str, str]:
     if output_format not in FORMATS:
         raise ValueError(f"{SETTINGS_KEY}.output_format is {output_format!r}; use one of {', '.join(FORMATS)}")
     parts = urlsplit(base_url)
-    if parts.scheme not in ("https", "http") or not parts.hostname:
+    try:
+        _ = parts.port  # raises on a non-numeric or out-of-range port
+    except ValueError:
+        parts = None
+    if parts is None or parts.scheme not in ("https", "http") or not parts.hostname:
         raise ValueError(f"{SETTINGS_KEY}.api_base_url must be an http(s) URL")
     return model, output_format, base_url
 
@@ -142,7 +150,7 @@ def read_settings(settings: Callable[[str], Any]) -> tuple[str, str, str]:
 def _display_url(url: str) -> str:
     """``url`` without userinfo, for error text."""
     parts = urlsplit(url)
-    host = parts.hostname or ""
+    host = f"[{parts.hostname}]" if ":" in (parts.hostname or "") else parts.hostname or ""
     return urlunsplit(parts._replace(netloc=f"{host}:{parts.port}" if parts.port else host))
 
 
@@ -168,26 +176,42 @@ def _api_error(status: int, body: bytes, reason: str) -> str:
 
 
 def _download(base_url: str, output_format: str, body: dict, api_key: str):
-    """Stream the response under a byte cap and an overall deadline; returns
-    ``(status, body bytes, reason, headers)``. Raises ``ValueError`` for an oversize or overdue body."""
+    """Stream the response under a byte cap and an overall deadline (headers included: a watchdog
+    closes the client); returns ``(status, body bytes, reason, headers)``. Raises
+    ``ResponseRefused`` for an oversize or overdue response, ``httpx.HTTPError`` otherwise."""
     import httpx
 
-    deadline = time.monotonic() + _DEADLINE_SECONDS
-    with httpx.stream(
-            "POST", f"{base_url}/v1/sound-generation", params={"output_format": output_format}, json=body,
-            headers={"xi-api-key": api_key, "accept": "audio/*"}, timeout=_CONNECT_READ_TIMEOUT) as response:
-        declared = response.headers.get("content-length", "")
-        if declared.isdigit() and int(declared) > MAX_AUDIO_BYTES:
-            raise ValueError(f"response of {declared} bytes is over the {MAX_AUDIO_BYTES} byte cap")
-        chunks, size = [], 0
-        for chunk in response.iter_bytes():
-            size += len(chunk)
-            if size > MAX_AUDIO_BYTES:
-                raise ValueError(f"response is over the {MAX_AUDIO_BYTES} byte cap")
-            if time.monotonic() > deadline:
-                raise ValueError(f"response took longer than {_DEADLINE_SECONDS:g} seconds")
-            chunks.append(chunk)
-        return response.status_code, b"".join(chunks), response.reason_phrase, response.headers
+    client = httpx.Client(timeout=_CONNECT_READ_TIMEOUT)
+    expired = threading.Event()
+
+    def expire():
+        expired.set()
+        client.close()
+
+    watchdog = threading.Timer(_DEADLINE_SECONDS, expire)
+    watchdog.daemon = True
+    watchdog.start()
+    try:
+        with client.stream(
+                "POST", f"{base_url}/v1/sound-generation", params={"output_format": output_format}, json=body,
+                headers={"xi-api-key": api_key, "accept": "audio/*"}) as response:
+            declared = response.headers.get("content-length", "")
+            if declared.isdigit() and int(declared) > MAX_AUDIO_BYTES:
+                raise ResponseRefused(f"response of {declared} bytes is over the {MAX_AUDIO_BYTES} byte cap")
+            chunks, size = [], 0
+            for chunk in response.iter_bytes():
+                size += len(chunk)
+                if size > MAX_AUDIO_BYTES:
+                    raise ResponseRefused(f"response is over the {MAX_AUDIO_BYTES} byte cap")
+                chunks.append(chunk)
+            return response.status_code, b"".join(chunks), response.reason_phrase, response.headers
+    except Exception as exc:
+        if expired.is_set() and not isinstance(exc, ResponseRefused):
+            raise ResponseRefused(f"no complete response within {_DEADLINE_SECONDS:g} seconds") from None
+        raise
+    finally:
+        watchdog.cancel()
+        client.close()
 
 
 def _slug(text: str) -> str:
@@ -214,8 +238,8 @@ def generate(args: dict, settings: Callable[[str], Any]) -> str:
     if not api_key:
         return tool_error(f"{API_KEY_ENV} is not set. Add your ElevenLabs API key with "
                           f"`hermes config set {API_KEY_ENV} <key>` or in Settings → Plugins.")
-    if not api_key.isprintable():
-        return tool_error(f"{API_KEY_ENV} contains control characters; re-enter the key.")
+    if not (api_key.isascii() and api_key.isprintable()):
+        return tool_error(f"{API_KEY_ENV} contains characters an API key cannot have; re-enter the key.")
     try:
         model, output_format, base_url = read_settings(settings)
         body = build_request(args, model)
@@ -223,9 +247,9 @@ def generate(args: dict, settings: Callable[[str], Any]) -> str:
         return tool_error(str(exc))
     try:
         status, audio, reason, headers = _download(base_url, output_format, body, api_key)
-    except ValueError as exc:
+    except ResponseRefused as exc:
         return tool_error(f"ElevenLabs at {_display_url(base_url)}: {exc}")
-    except httpx.HTTPError as exc:  # exception text can echo request headers: name the class only
+    except (httpx.HTTPError, httpx.InvalidURL) as exc:  # exception text can echo request headers: name the class only
         return tool_error(f"Could not reach ElevenLabs at {_display_url(base_url)}: {type(exc).__name__}")
     if status != 200:
         return tool_error(_api_error(status, audio, reason))
