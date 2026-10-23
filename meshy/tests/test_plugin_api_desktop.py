@@ -36,6 +36,7 @@ def api(tmp_path, monkeypatch):
         raise AssertionError("network call from a route that must stay local")
 
     monkeypatch.setattr(urllib.request, "urlopen", tripwire)
+    monkeypatch.setattr(urllib.request, "build_opener", tripwire)
     spec = importlib.util.spec_from_file_location("meshy_plugin_api_desktop_under_test", _SRC)
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)

@@ -33,6 +33,8 @@ Routes:
 from __future__ import annotations
 
 import base64
+import hashlib
+import http.client
 import json
 import logging
 import os
@@ -44,6 +46,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from fastapi import APIRouter, HTTPException, Query, Request
@@ -62,16 +65,36 @@ _MODEL_MIME = {".glb": "model/gltf-binary", ".gltf": "model/gltf+json", ".fbx": 
 # What /file serves: models, an OBJ's material file, and images (thumbnails, saved image sets, OBJ textures).
 _MIME = {**_MODEL_MIME, ".mtl": "text/plain", ".png": "image/png",
          ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".webp": "image/webp"}
-# Model types the list endpoints serve, newest-first per type; merged and re-sorted below.
-_MODEL_ENDPOINTS = (("text-to-3d", "/openapi/v2/text-to-3d"), ("image-to-3d", "/openapi/v1/image-to-3d"),
-                    ("multi-image-to-3d", "/openapi/v1/multi-image-to-3d"), ("remesh", "/openapi/v1/remesh"),
-                    ("retexture", "/openapi/v1/retexture"), ("rigging", "/openapi/v1/rigging"),
-                    ("animation", "/openapi/v1/animations"))
-_IMAGE_ENDPOINTS = (("text-to-image", "/openapi/v1/text-to-image"),
-                    ("image-to-image", "/openapi/v1/image-to-image"))
-# A record's ``type`` uses Meshy's API names, not the endpoint labels above.
-_TYPE_ENDPOINT = {"rig": "rigging", "animate": "animation",
+# Where a signed asset link (and every redirect hop of it) may point.
+_ASSET_HOSTS = frozenset({"assets.meshy.ai"})
+_ASSET_SCHEMES = frozenset({"https"})
+# Every route the plugin's tools create tasks on (the Meshy MCP server's TASK_ENDPOINTS): GET <route>/<id>
+# reads one task, GET <route> lists them. Creative Lab routes are per product AND stage.
+_CREATIVE_LAB = ("figure", "lamp", "keychain", "fridge-magnet", "vinyl-figure", "brick-figure", "keycap", "fidget-pixel")
+_TASK_ROUTES = {
+    "text-to-3d": "/openapi/v2/text-to-3d", "image-to-3d": "/openapi/v1/image-to-3d",
+    "multi-image-to-3d": "/openapi/v1/multi-image-to-3d", "remesh": "/openapi/v1/remesh",
+    "retexture": "/openapi/v1/retexture", "rigging": "/openapi/v1/rigging", "animation": "/openapi/v1/animations",
+    "text-to-image": "/openapi/v1/text-to-image", "image-to-image": "/openapi/v1/image-to-image",
+    "convert": "/openapi/v1/convert", "resize": "/openapi/v1/resize", "uv-unwrap": "/openapi/v1/uv-unwrap",
+    "print-repair": "/openapi/v1/print/repair", "print-split": "/openapi/v1/print/split",
+    "print-multi-color": "/openapi/v1/print/multi-color", "print-analyze": "/openapi/v1/print/analyze",
+    "text-to-motion": "/openapi/v1/text-to-motion",
+    **{f"creative-lab-{p}-{stage}": f"/openapi/creative-lab/{p}/v1/{stage}"
+       for p in _CREATIVE_LAB for stage in ("prototype", "build")},
+    "creative-lab-fidget-collapsible": "/openapi/creative-lab/fidget-collapsible/v1",
+}
+# A record's ``type`` uses Meshy's API names; these differ from the route names above.
+_TYPE_ENDPOINT = {"rig": "rigging", "animate": "animation", "multi-color-print": "print-multi-color",
                   "text-to-3d-preview": "text-to-3d", "text-to-3d-refine": "text-to-3d"}
+# Types whose output is a 3D model, for the gallery (newest-first per type; merged and re-sorted below).
+_MODEL_TYPES = ("text-to-3d", "image-to-3d", "multi-image-to-3d", "remesh", "retexture", "rigging", "animation",
+                "convert", "resize", "uv-unwrap", "print-repair", "print-split", "print-multi-color",
+                *(t for t in _TASK_ROUTES if t.startswith("creative-lab-") and not t.endswith("-prototype")))
+_MODEL_ENDPOINTS = tuple((t, _TASK_ROUTES[t]) for t in _MODEL_TYPES)
+_IMAGE_ENDPOINTS = tuple((t, _TASK_ROUTES[t]) for t in ("text-to-image", "image-to-image"))
+# Meshy allows 20 requests/s per key: list and probe fan-outs share this many in-flight calls.
+_FANOUT = 4
 
 
 # Defaults mirror plugin.json ``extensions.com.nousresearch.hermes.config_schema``; Settings ▸ Plugins
@@ -98,11 +121,48 @@ def _api_key() -> str | None:
     return get_secret(_KEY_ENV) or None
 
 
+class _RedirectRefused(urllib.error.URLError):
+    """A redirect to a host the request may not go to (another host, or plain http)."""
+
+
+class _GuardedRedirects(urllib.request.HTTPRedirectHandler):
+    """Follow a redirect only where ``allowed`` says: urllib otherwise follows any hop to any host, http
+    included, and re-sends the request's headers there (the API key for a Meshy API call)."""
+
+    def __init__(self, allowed):
+        super().__init__()
+        self._allowed = allowed
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        if not self._allowed(newurl):
+            fp.close()
+            raise _RedirectRefused("redirect off the allowed host")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open(req, timeout: float, allowed):
+    """urlopen, but every redirect hop is re-validated with ``allowed`` (the one network seam)."""
+    return urllib.request.build_opener(_GuardedRedirects(allowed)).open(req, timeout=timeout)
+
+
+def _same_api_origin(url: str) -> bool:
+    api, hop = urllib.parse.urlsplit(_API), urllib.parse.urlsplit(url)
+    return (hop.scheme, hop.hostname, hop.port) == (api.scheme, api.hostname, api.port)
+
+
+def _asset_allowed(url: object) -> bool:
+    parts = urllib.parse.urlsplit(str(url or ""))
+    return parts.scheme in _ASSET_SCHEMES and parts.hostname in _ASSET_HOSTS
+
+
 def _meshy_get(path: str, key: str, timeout: float = 15.0):
     req = urllib.request.Request(_API + path, headers={
         "Authorization": f"Bearer {key}", "User-Agent": "hermes-meshy-plugin/0.3"})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+    try:
+        with _open(req, timeout, _same_api_origin) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+    except http.client.HTTPException as exc:  # a short or malformed response: report it as unreachable
+        raise urllib.error.URLError(exc) from exc
 
 
 def _meshy_error(exc: Exception) -> HTTPException:
@@ -110,6 +170,29 @@ def _meshy_error(exc: Exception) -> HTTPException:
         detail = "Meshy rejected the API key" if exc.code in (401, 403) else f"Meshy API error {exc.code}"
         return HTTPException(status_code=502, detail=detail)
     return HTTPException(status_code=502, detail="Meshy API unreachable")
+
+
+def _disk_error(exc: OSError) -> HTTPException:
+    return HTTPException(status_code=500, detail=f"could not write the file ({exc.strerror or type(exc).__name__})")
+
+
+_FANOUT_SLOTS = threading.BoundedSemaphore(_FANOUT)
+
+
+def _fan_out(fn, items) -> list:
+    """Futures of ``fn(item)`` per item, in order; at most _FANOUT of them run at once across all requests."""
+    def run(item):
+        with _FANOUT_SLOTS:
+            return fn(item)
+    with ThreadPoolExecutor(max_workers=_FANOUT) as pool:
+        return [pool.submit(run, item) for item in items]
+
+
+def _as_int(value) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError, OverflowError):
+        return 0
 
 
 # The asset index and provenance are read-modify-written by concurrent requests in the one dashboard process.
@@ -120,8 +203,11 @@ def _write_json(target: Path, value: object) -> None:
     """Atomic replace through a per-writer temp file (callers hold _STATE_LOCK)."""
     target.parent.mkdir(parents=True, exist_ok=True)
     tmp = target.with_name(f"{target.name}.{os.getpid()}.{threading.get_ident()}.part")
-    tmp.write_text(json.dumps(value, indent=1), encoding="utf-8")
-    tmp.replace(target)
+    try:
+        tmp.write_text(json.dumps(value, indent=1), encoding="utf-8")
+        tmp.replace(target)
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _asset_error(exc: Exception) -> HTTPException:
@@ -131,6 +217,8 @@ def _asset_error(exc: Exception) -> HTTPException:
             return HTTPException(status_code=410, detail="This asset is unavailable or its download link has expired. "
                                  "Open a locally saved copy if you have one.")
         return HTTPException(status_code=502, detail=f"Meshy asset download failed (HTTP {exc.code})")
+    if isinstance(exc, _RedirectRefused):
+        return HTTPException(status_code=502, detail="Meshy asset link redirected off assets.meshy.ai")
     return HTTPException(status_code=502, detail="Meshy asset download unreachable")
 
 
@@ -183,6 +271,7 @@ def status():
     except (urllib.error.URLError, OSError, ValueError) as exc:
         # The status chip shows WHY there is no number (bad key vs offline) instead of a stale one.
         return {"configured": True, "settings": _settings(), "error": _meshy_error(exc).detail}
+    bal = bal if isinstance(bal, dict) else {}
     return {"configured": True, "settings": _settings(), "balance": bal.get("balance"),
             "monthly_credits": bal.get("monthly_credits"), "permanent_credits": bal.get("permanent_credits"),
             "monthly_resets_at": bal.get("monthly_resets_at")}
@@ -193,7 +282,7 @@ def _credits_by_task(key: str) -> dict[str, int]:
         rows = _meshy_get("/openapi/v1/usage/tasks?page_size=50", key)
     except (urllib.error.URLError, OSError, ValueError):
         return {}  # usage is a team/API-key view; a personal key may not have it
-    return {r["task_id"]: int(r["consumed_credits"]) for r in rows
+    return {r["task_id"]: int(r["consumed_credits"]) for r in (rows if isinstance(rows, list) else [])
             if isinstance(r, dict) and r.get("task_id") and isinstance(r.get("consumed_credits"), (int, float))}
 
 
@@ -205,9 +294,11 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
         return {"configured": False, "models": []}
     merged: list[dict] = []
     records: dict[str, tuple[str, dict]] = {}
-    for task_type, path in (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS):
+    endpoints = (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS)
+    lists = _fan_out(lambda e: _meshy_get(f"{e[1]}?page_size={limit}&sort_by=-created_at", key), endpoints)
+    for (task_type, _path), listed in zip(endpoints, lists):
         try:
-            rows = _meshy_get(f"{path}?page_size={limit}&sort_by=-created_at", key)
+            rows = listed.result()
         except urllib.error.HTTPError as exc:
             if exc.code in (401, 403):
                 raise _meshy_error(exc) from exc
@@ -215,7 +306,7 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
         except (urllib.error.URLError, OSError, ValueError) as exc:
             raise _meshy_error(exc) from exc
         for row in rows if isinstance(rows, list) else []:
-            if row.get("status") != "SUCCEEDED":
+            if not isinstance(row, dict) or row.get("status") != "SUCCEEDED":
                 continue
             task_id = row.get("id")
             if not isinstance(task_id, str) or not task_id:
@@ -242,10 +333,14 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
     merged.sort(key=lambda m: m.get("created_at") or 0, reverse=True)
     credits = _credits_by_task(key)
     prov = _load_prov()
-    saved = {}
-    for f in local(limit=200)["files"]:
+    best: dict[str, tuple[tuple[bool, bool], str]] = {}
+    for f in local(limit=200)["files"]:  # newest first
         if f.get("task") and f.get("kind", "model") == "model":
-            saved.setdefault(f["task"], f["path"])
+            # Several saved formats of one task: open the GLB (else one the viewer draws), not the last one saved.
+            rank = (not f["path"].lower().endswith(".glb"), not f.get("viewable", True))
+            if f["task"] not in best or rank < best[f["task"]][0]:
+                best[f["task"]] = (rank, f["path"])
+    saved = {task: path for task, (_rank, path) in best.items()}
     for m in merged:
         if m["credits"] is None:
             m["credits"] = credits.get(m["task_id"])
@@ -297,7 +392,7 @@ def _record_asset(path: Path, task_id: str | None = None, export: bool = False) 
         if not any(resolved.is_relative_to(root) for root in _allowed_roots()):
             return
         st = resolved.stat()
-        task = task_id if isinstance(task_id, str) and _TASK_ID.match(task_id) else None
+        task = task_id if isinstance(task_id, str) and _TASK_ID.fullmatch(task_id) else None
         now = int(time.time() * 1000)
         with _STATE_LOCK:  # concurrent /file reads each upsert: one read-modify-write at a time
             rows = _load_index()
@@ -352,7 +447,7 @@ def local(limit: int = Query(50, ge=1, le=200)):
         except OSError:
             continue
         seen[str(p)] = {"path": str(p), "name": p.name, "project": p.parent.name, "bytes": st.st_size,
-                        "modified": max(int(st.st_mtime * 1000), int(row.get("last_opened") or 0)),
+                        "modified": max(int(st.st_mtime * 1000), _as_int(row.get("last_opened"))),
                         "task": row.get("task_id") if isinstance(row.get("task_id"), str) else None,
                         "viewable": _viewable(p, st.st_size)}
     files = sorted(seen.values(), key=lambda f: f["modified"], reverse=True)[:limit]
@@ -407,13 +502,16 @@ def _local_task(model: Path) -> str | None:
             found = (model.parent / _TASK_SIDECAR).read_text(encoding="utf-8").strip()
         except OSError:
             return None
-    return found if isinstance(found, str) and _TASK_ID.match(found) else None
+    return found if isinstance(found, str) and _TASK_ID.fullmatch(found) else None
 
 
 @router.get("/file")
 def file(path: str, task: str | None = None):
     target = _resolve_readable(path)
-    data = target.read_bytes()
+    try:
+        data = target.read_bytes()
+    except OSError:  # removed or replaced since it was resolved
+        raise HTTPException(status_code=404, detail="file not found") from None
     if target.suffix.lower() in _INDEXED:
         _record_asset(target, task)
     return {"name": target.name, "bytes": len(data), "mtime": int(target.stat().st_mtime * 1000),
@@ -422,7 +520,8 @@ def file(path: str, task: str | None = None):
 
 # Display order and labels for the download menu; ``mtl`` rides along with ``obj``, never on its own.
 _FORMAT_ORDER = ("glb", "fbx", "obj", "stl", "usdz", "3mf", "blend")
-_TASK_ID = re.compile(r"^[0-9a-f][0-9a-f-]{15,63}$")
+# Always fullmatch: ``$`` also matches before a trailing newline.
+_TASK_ID = re.compile(r"[0-9a-f][0-9a-f-]{15,63}")
 # A refined Meshy OBJ is ~180 MB; the cap bounds a runaway response, not a real model.
 _MAX_SAVE_BYTES = 1024 * 1024 * 1024
 
@@ -432,7 +531,7 @@ _MAX_SAVE_BYTES = 1024 * 1024 * 1024
 # clips, ``result.basic_animations.<clip>_<fmt>_url``. The main file maps to the plain format key;
 # extra clips map to ``<fmt>:<clip>`` (``glb:walking``) so the Download menu lists one row each.
 _MAIN_OUTPUTS = ("rigged_character", "animation", "processed")
-_VARIANT = re.compile(r"^[a-z0-9_]{1,40}$")
+_VARIANT = re.compile(r"[a-z0-9_]{1,40}")
 
 
 def _result_urls(row: dict) -> dict[str, str]:
@@ -460,7 +559,7 @@ def _result_urls(row: dict) -> dict[str, str]:
             out.setdefault(fmt, url)
             return
         clip = re.sub(r"^(basic_animations_|processed_)", "", name)
-        if _VARIANT.match(clip):
+        if _VARIANT.fullmatch(clip):
             out.setdefault(f"{fmt}:{clip}", url)
 
     for field, value in result.items():
@@ -470,21 +569,6 @@ def _result_urls(row: dict) -> dict[str, str]:
         else:
             take("", field, value)
     return out
-
-
-def _owning_record(row: dict, task_id: str, key: str) -> dict:
-    """Meshy answers a task id on every endpoint, reshaped to that endpoint (a rig id read from
-    text-to-3d has ``model_urls`` and no rig files). The record's own ``type`` names the real owner;
-    re-read rigging/animation tasks there so their ``result`` files are what the menus list."""
-    kind = str(row.get("type") or "").lower()
-    path = "/openapi/v1/rigging" if kind.startswith("rig") else "/openapi/v1/animations" if "anim" in kind else None
-    if not path or isinstance(row.get("result"), dict):
-        return row
-    try:
-        owned = _meshy_get(f"{path}/{task_id}", key)
-    except (urllib.error.URLError, OSError, ValueError):
-        return row
-    return owned if isinstance(owned, dict) and owned.get("id") == task_id else row
 
 
 def _clip_label(urls: dict[str, str]) -> str:
@@ -503,37 +587,136 @@ def _format_sort_key(key: str) -> tuple[int, str]:
     return (_FORMAT_ORDER.index(base) if base in _FORMAT_ORDER else 99, clip or "")
 
 
-def _task(task_id: str, key: str, *, include_images: bool = False, images_only: bool = False) -> dict:
-    """The task record (with signed ``model_urls``), found on whichever generation endpoint owns it."""
-    if not _TASK_ID.match(task_id or ""):
+# Resolved task routes, so polling a task costs one Meshy call instead of a probe of every route, and recent
+# "no such task" verdicts, so a card for a deleted task does not re-probe on every retry. Keyed by (key
+# fingerprint, task id): one dashboard process serves several profiles, each with its own key. Touched from
+# request threads, so every read and write holds _ROUTE_LOCK (no I/O under it).
+_ROUTE_LOCK = threading.Lock()
+_ROUTE_CACHE: dict[tuple[str, str], str] = {}
+_MISS_CACHE: dict[tuple[str, str], float] = {}
+_ROUTE_CACHE_CAP = 1024
+_MISS_TTL_S = 30.0
+# Meshy's generic GET routes answer for a task of (almost) any type, reshaped for that route; the record's own
+# ``type`` names the route with its full result (the Meshy MCP server's PROBE_TASK_TYPES note). Creative Lab
+# and Text to Motion answer only on their own routes, and the rest are probed too in case a route stops
+# answering generically.
+_PROBE_FIRST = ("image-to-3d", "text-to-3d")
+
+
+def _route_for(task_type: object) -> str | None:
+    name = str(task_type or "").strip().lower()
+    return _TASK_ROUTES.get(_TYPE_ENDPOINT.get(name, name))
+
+
+def _task_at(route: str, task_id: str, key: str) -> dict | None:
+    """The task as ``route`` returns it; None when that route says it is not there (400/404 or another id).
+    Any other failure is Meshy's (outage, rate limit, rejected key): a 502, never a "no such task"."""
+    try:
+        row = _meshy_get(f"{route}/{task_id}", key)
+    except urllib.error.HTTPError as exc:
+        if exc.code in (400, 404):
+            return None
+        raise _meshy_error(exc) from exc
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        raise _meshy_error(exc) from exc
+    return row if isinstance(row, dict) and row.get("id") == task_id else None
+
+
+def _remember(slot: tuple[str, str], route: str | None) -> None:
+    with _ROUTE_LOCK:
+        if route is None:
+            _ROUTE_CACHE.pop(slot, None)
+            _MISS_CACHE[slot] = time.monotonic() + _MISS_TTL_S
+            cache: dict = _MISS_CACHE
+        else:
+            _MISS_CACHE.pop(slot, None)
+            _ROUTE_CACHE[slot] = route
+            cache = _ROUTE_CACHE
+        while len(cache) > _ROUTE_CACHE_CAP:
+            cache.pop(next(iter(cache)))
+
+
+def _owned(row: dict, route: str, task_id: str, key: str) -> tuple[dict, str]:
+    """Re-read a task found on a generic route from its own route, which carries its files."""
+    own = _route_for(row.get("type"))
+    if own and own != route:
+        owned = _task_at(own, task_id, key)
+        if owned is not None:
+            return owned, own
+    return row, route
+
+
+def _task(task_id: str, key: str) -> dict:
+    """The task record (signed ``model_urls`` / ``result`` / ``image_urls``) from the route that owns it."""
+    if not _TASK_ID.fullmatch(task_id or ""):
         raise HTTPException(status_code=400, detail="task id required")
-    endpoints = _IMAGE_ENDPOINTS if images_only else (*_MODEL_ENDPOINTS, *(_IMAGE_ENDPOINTS if include_images else ()))
-    for _task_type, path in endpoints:
+    slot = (hashlib.sha256(key.encode("utf-8", "replace")).hexdigest()[:16], task_id)
+    with _ROUTE_LOCK:
+        cached = _ROUTE_CACHE.get(slot)
+        missed = _MISS_CACHE.get(slot, 0.0) > time.monotonic()
+    if cached:
+        row = _task_at(cached, task_id, key)
+        if row is not None:
+            return row
+        _remember(slot, None)  # deleted, or no longer this key's: probe again below
+    elif missed:
+        raise HTTPException(status_code=404, detail="Meshy has no finished task with that id")
+    probe = [_TASK_ROUTES[t] for t in _PROBE_FIRST]
+    for route in probe:
+        row = _task_at(route, task_id, key)
+        if row is not None:
+            row, route = _owned(row, route, task_id, key)
+            _remember(slot, route)
+            return row
+    rest = [r for r in dict.fromkeys(_TASK_ROUTES.values()) if r not in probe]
+    errors = []
+    for route, found in zip(rest, _fan_out(lambda r: _task_at(r, task_id, key), rest)):
         try:
-            row = _meshy_get(f"{path}/{task_id}", key)
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                raise _meshy_error(exc) from exc
-            continue  # 404/400: another endpoint owns this id
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise _meshy_error(exc) from exc
-        if isinstance(row, dict) and row.get("id") == task_id:
-            return _owning_record(row, task_id, key)
+            row = found.result()
+        except HTTPException as exc:
+            errors.append(exc)
+            continue
+        if row is not None:
+            row, route = _owned(row, route, task_id, key)
+            _remember(slot, route)
+            return row
+    if errors:
+        raise errors[0]
+    _remember(slot, None)
     raise HTTPException(status_code=404, detail="Meshy has no finished task with that id")
 
 
 def _asset_url(url: object) -> str:
-    parts = urllib.parse.urlsplit(str(url or ""))
-    if parts.scheme != "https" or parts.hostname != "assets.meshy.ai":
+    if not _asset_allowed(url):
         raise HTTPException(status_code=502, detail="unexpected asset host")
     return str(url)
+
+
+def _asset_chunks(url: str, timeout: float, cap: int, too_big: str):
+    """The bytes of an asset link, streamed; refused over ``cap`` (declared or counted) and on any redirect
+    off the asset host. Network failures become HTTP errors here, so an OSError the caller sees is its own disk."""
+    try:
+        with _open(_asset_url(url), timeout, _asset_allowed) as resp:
+            declared = str(resp.headers.get("Content-Length") or "").strip()
+            if declared.isdigit() and int(declared) > cap:
+                raise HTTPException(status_code=413, detail=too_big)
+            copied = 0
+            while chunk := resp.read(1 << 20):
+                copied += len(chunk)
+                if copied > cap:
+                    raise HTTPException(status_code=413, detail=too_big)
+                yield chunk
+    except (OSError, http.client.HTTPException) as exc:  # URLError, HTTPError, timeouts, resets, short reads
+        raise _asset_error(exc) from exc
 
 
 def _save_target(task_id: str, beside: str | None) -> tuple[Path, str, Path | None]:
     """Folder + file stem for a saved format (+ the anchor): next to the model the card shows, else
     meshy_output/<task>. Validates both inputs, so callers run it BEFORE spending a Meshy API call."""
-    if not _TASK_ID.match(task_id or ""):
+    if not _TASK_ID.fullmatch(task_id or ""):
         raise HTTPException(status_code=400, detail="task id required")
+    if beside is not None and not isinstance(beside, str):
+        raise HTTPException(status_code=400, detail="beside must be a path")
     if beside:
         anchor = _resolve_readable(beside)
         return anchor.parent, anchor.stem, anchor
@@ -589,22 +772,29 @@ def _staging(dest: Path) -> tuple[int, Path]:
     return os.open(part, os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0), 0o666), part
 
 
-def _download(url: str, dest: Path) -> None:
-    fd, part = _staging(dest)
+def _write_new(dest: Path, chunks) -> None:
+    """Publish ``chunks`` at ``dest`` through a fresh staging file; nothing is left behind on failure."""
     try:
-        with open(fd, "wb") as out, urllib.request.urlopen(_asset_url(url), timeout=120) as resp:
-            copied = 0
-            while chunk := resp.read(1 << 20):
-                copied += len(chunk)
-                if copied > _MAX_SAVE_BYTES:
-                    raise HTTPException(status_code=413, detail="asset larger than 1 GB")
+        fd, part = _staging(dest)
+    except OSError as exc:
+        raise _disk_error(exc) from exc
+    try:
+        with open(fd, "wb") as out:
+            for chunk in chunks:
                 out.write(chunk)
         os.replace(part, dest)
-    except (urllib.error.URLError, OSError) as exc:
-        raise _asset_error(exc) from exc
+    except OSError as exc:  # network errors arrive as HTTPException: this is the disk
+        raise _disk_error(exc) from exc
     finally:
-        if part is not None:
-            part.unlink(missing_ok=True)
+        part.unlink(missing_ok=True)
+
+
+def _download(url: str, dest: Path) -> None:
+    chunks = _asset_chunks(url, 120, _MAX_SAVE_BYTES, "asset larger than 1 GB")
+    try:
+        _write_new(dest, chunks)
+    finally:
+        chunks.close()
 
 
 @router.get("/formats")
@@ -638,7 +828,7 @@ def save(body: dict):
     so this spends no credits. OBJ brings its .mtl and base-colour texture, renamed per model."""
     task_id, fmt = str(body.get("task") or ""), str(body.get("format") or "").lower()
     base, clip = _split_format(fmt)
-    if base not in _FORMAT_ORDER or (clip is not None and not _VARIANT.match(clip)):
+    if base not in _FORMAT_ORDER or (clip is not None and not _VARIANT.fullmatch(clip)):
         raise HTTPException(status_code=400, detail="unknown format")
     beside = body.get("beside") or None
     folder, stem, anchor = _save_target(task_id, beside)
@@ -649,9 +839,25 @@ def save(body: dict):
     urls = _result_urls(row)
     if not urls.get(fmt):
         raise HTTPException(status_code=404, detail=f"this model has no {fmt.upper()} file")
-    folder.mkdir(parents=True, exist_ok=True)
+    try:
+        return _save_format(row, urls, task_id, fmt, folder, stem, anchor, bool(beside))
+    except OSError as exc:  # downloads report the network as HTTP errors: this is the local disk
+        raise _disk_error(exc) from exc
+
+
+def _save_format(row: dict, urls: dict[str, str], task_id: str, fmt: str, folder: Path, stem: str,
+                 anchor: Path | None, beside: bool) -> dict:
     if not beside:
-        (folder / _TASK_SIDECAR).write_text(task_id, encoding="utf-8")
+        # meshy_output/<task> is the plugin's own folder: a link there would send the save somewhere else.
+        if folder.is_symlink():
+            raise HTTPException(status_code=403, detail="the download folder must not be a symlink")
+        folder.mkdir(parents=True, exist_ok=True)
+        if folder.resolve() != (_data_root() / "meshy_output").resolve() / task_id:
+            raise HTTPException(status_code=403, detail="the download folder must not be a symlink")
+        # Replaced, never written through: a planted link at the sidecar's name must not redirect the write.
+        _write_new(folder / _TASK_SIDECAR, [task_id.encode("ascii")])
+    else:
+        folder.mkdir(parents=True, exist_ok=True)
     # Two clicks (or two windows) saving one file: the second waits, then finds it saved.
     with _STATE_LOCK:
         dest_lock = _SAVE_LOCKS.setdefault(str(folder / _saved_name(stem, fmt)), threading.Lock())
@@ -685,9 +891,8 @@ def _saved_name(stem: str, fmt: str) -> str:
 def _save_obj_material(row: dict, mtl_url: str, folder: Path, stem: str) -> None:
     """The .mtl names ``texture_0.png``; save it as ``<stem>_texture.png`` so two models in one folder
     never share (and overwrite) a texture, and point the .mtl at the new name."""
-    with urllib.request.urlopen(_asset_url(mtl_url), timeout=60) as resp:
-        mtl = resp.read(1 << 20).decode("utf-8", "replace")
-    textures = row.get("texture_urls") or []
+    mtl = b"".join(_asset_chunks(mtl_url, 60, 1 << 20, "material file larger than 1 MB")).decode("utf-8", "replace")
+    textures = row.get("texture_urls") if isinstance(row.get("texture_urls"), list) else []
     base = textures[0].get("base_color") if textures and isinstance(textures[0], dict) else None
     if base:
         _download(base, folder / f"{stem}_texture.png")
@@ -721,20 +926,14 @@ def _save_obj_material(row: dict, mtl_url: str, folder: Path, stem: str) -> None
 def remote(url: str):
     """Fetch a Meshy asset URL (signed ``assets.meshy.ai`` link) server-side; the renderer cannot
     (no CORS on that host). Only that host, only model/image types."""
-    parts = urllib.parse.urlsplit(url)
-    if parts.scheme != "https" or parts.hostname != "assets.meshy.ai":
+    if not _asset_allowed(url):
         raise HTTPException(status_code=400, detail="only assets.meshy.ai URLs")
+    parts = urllib.parse.urlsplit(url)
     suffix = Path(parts.path).suffix.lower()
     if suffix not in _MIME:
         raise HTTPException(status_code=415, detail="only .glb and image assets")
     started = time.monotonic()
-    try:
-        with urllib.request.urlopen(url, timeout=60) as resp:
-            data = resp.read(_MAX_FILE_BYTES + 1)
-    except (urllib.error.URLError, OSError) as exc:
-        raise _asset_error(exc) from exc
-    if len(data) > _MAX_FILE_BYTES:
-        raise HTTPException(status_code=413, detail="asset too large for the viewer")
+    data = b"".join(_asset_chunks(url, 60, _MAX_FILE_BYTES, "asset too large for the viewer"))
     _log.debug("meshy remote asset %s: %d bytes in %.1fs", parts.path, len(data), time.monotonic() - started)
     return {"name": Path(parts.path).name, "bytes": len(data),
             "dataUrl": f"data:{_MIME[suffix]};base64,{base64.b64encode(data).decode('ascii')}"}
@@ -754,7 +953,7 @@ def task_state(task: str):
     error = row.get("task_error") if isinstance(row.get("task_error"), dict) else {}
     urls = _result_urls(row) if status == "SUCCEEDED" else {}
     return {
-        "task": task, "status": status, "progress": int(row.get("progress") or 0),
+        "task": task, "status": status, "progress": _as_int(row.get("progress")),
         "type": str(row.get("type") or ""), "stage": str(row.get("mode") or row.get("type") or ""),
         "prompt": str(row.get("prompt") or "")[:200] or _clip_label(urls) or None,
         "thumbnail": row.get("thumbnail_url") if isinstance(row.get("thumbnail_url"), str) else None,
@@ -767,7 +966,9 @@ def task_state(task: str):
 # In-flight tasks for the Desktop progress chip. Meshy's list endpoints return status + progress per
 # task; the chip polls this only while a Meshy tool runs or a task is still in flight.
 _ACTIVE_STATUSES = ("PENDING", "IN_PROGRESS")
-_ACTIVE_ENDPOINTS = (*_MODEL_ENDPOINTS, ("text-to-image", "/openapi/v1/text-to-image"))
+# Every type the plugin's tools create except Creative Lab: meshy_creative_lab waits for its own stages and
+# reports progress itself, and its 17 per-stage list routes per poll would crowd Meshy's 20 requests/s.
+_ACTIVE_ENDPOINTS = tuple((t, r) for t, r in _TASK_ROUTES.items() if not t.startswith("creative-lab-"))
 # A task queued longer than this is Meshy's problem, not a progress bar's (Meshy advises 60 min max).
 _ACTIVE_MAX_AGE_MS = 60 * 60 * 1000
 
@@ -786,8 +987,9 @@ def _active_rows(task_type: str, path: str, key: str) -> list[dict]:
         if isinstance(created, (int, float)) and created and now_ms - created > _ACTIVE_MAX_AGE_MS:
             continue
         stage = str(row.get("mode") or row.get("type") or task_type)
-        out.append({"task_id": row.get("id"), "task_type": task_type, "stage": stage,
-                    "status": row.get("status"), "progress": int(row.get("progress") or 0),
+        own = _TYPE_ENDPOINT.get(str(row.get("type") or ""), str(row.get("type") or ""))
+        out.append({"task_id": row.get("id"), "task_type": own if own in _TASK_ROUTES else task_type, "stage": stage,
+                    "status": row.get("status"), "progress": _as_int(row.get("progress")),
                     "prompt": str(row.get("prompt") or "")[:120], "created_at": created})
     return out
 
@@ -798,10 +1000,12 @@ def active():
     key = _api_key()
     if not key:
         return {"configured": False, "tasks": []}
-    from concurrent.futures import ThreadPoolExecutor
-    with ThreadPoolExecutor(max_workers=len(_ACTIVE_ENDPOINTS)) as pool:
+    with ThreadPoolExecutor(max_workers=8) as pool:
         batches = list(pool.map(lambda e: _active_rows(e[0], e[1], key), _ACTIVE_ENDPOINTS))
-    tasks = sorted((t for b in batches for t in b), key=lambda t: t.get("created_at") or 0, reverse=True)
+    # Some list routes also return sibling types (text-to-image lists image-to-image tasks): one row per task.
+    unique = {t["task_id"]: t for b in batches for t in b if isinstance(t.get("task_id"), str)}
+    tasks = sorted(unique.values(), key=lambda t: t["created_at"] if isinstance(t["created_at"], (int, float)) else 0,
+                   reverse=True)
     return {"configured": True, "tasks": tasks}
 
 
@@ -814,9 +1018,10 @@ _ACTIONS = (
     ("texture", "Texture it", 10, ("text-to-3d-preview",),
      "texture it with meshy_text_to_3d_refine (10 credits). Ask me for a texture style only if I haven't given one."),
     # Text only: an image task's record does not keep its input image, so it cannot be re-run from the id.
+    # Priced and worded per task by _regenerate (the same ai_model, so the same price as the original).
     ("regenerate", "Regenerate", None, ("text-to-3d-preview",),
-     ("regenerate it: a NEW meshy_text_to_3d preview with the same prompt and model_type (read them with "
-      "meshy_get_task_status), new seed ({cost} credits, what the original cost). Meshy's API has no free retry.")),
+     ("regenerate it: a NEW meshy_text_to_3d preview with the same prompt (read it with meshy_get_task_status) "
+      "and {settings} ({cost} credits). Meshy's API has no free retry.")),
     ("remesh", "Remesh", 5, ("text-to-3d-preview", *_GENERATED, "retexture"),
      ("remesh it with meshy_remesh (5 credits). Suggest a triangle target for what it is (player character "
       "~15k, NPC 5-15k, weapon ~3k, small prop ~1.5k; mobile about half; close-up or print: keep detail) and ask "
@@ -837,9 +1042,36 @@ _ACTIONS = (
 )
 
 
+# meshy_text_to_3d preview prices (the tool's own description). Ultra geometry (2k/4k) adds 5.
+_PREVIEW_PRICE = {"latest": 20, "meshy-7.1": 20, "meshy-7": 20, "meshy-6": 20,
+                  "meshy-6-lite": 5, "meshy-t2": 5, "meshy-t2.5": 5}
+
+
+def _regenerate(row: dict, rec: dict) -> tuple[str, int]:
+    """The settings a re-run must pass to land on the original's model, and what that model costs.
+
+    Meshy's task record has no ``ai_model``, and meshy_text_to_3d defaults to ``latest`` (20 credits), so a
+    re-run that omits it can cost 4x what a meshy-6-lite preview did. The model comes from the recorded tool
+    call; unrecorded, a 5-credit standard preview can only have been meshy-6-lite, and otherwise the tool's
+    default for that model_type is named explicitly (and priced)."""
+    settings = rec.get("settings") if rec.get("tool") == "meshy_text_to_3d" and isinstance(rec.get("settings"), dict) else {}
+    model_type = next((v for v in (row.get("model_type"), settings.get("model_type"))
+                       if isinstance(v, str) and re.fullmatch(r"[a-z0-9-]{1,32}", v)), "standard")
+    model = next((v for v in (settings.get("ai_model"), row.get("ai_model")) if isinstance(v, str) and v in _PREVIEW_PRICE), None)
+    if model is None:
+        model = ("meshy-t2" if model_type == "smart-topology"
+                 else "meshy-6-lite" if row.get("consumed_credits") == 5 else "latest")
+    picked = [f'ai_model "{model}"', f'model_type "{model_type}"']
+    cost = _PREVIEW_PRICE[model]
+    if settings.get("geometry_resolution") in ("2k", "4k"):
+        picked.append(f'geometry_resolution "{settings["geometry_resolution"]}"')
+        cost += 5
+    return ", ".join(picked), cost
+
+
 @router.get("/actions")
 def actions(task: str):
-    if not _TASK_ID.match(task or ""):
+    if not _TASK_ID.fullmatch(task or ""):
         raise HTTPException(status_code=400, detail="task id required")
     key = _api_key()
     if not key:
@@ -848,15 +1080,19 @@ def actions(task: str):
     kind = str(row.get("type") or "").lower()
     spent = row.get("consumed_credits") if isinstance(row.get("consumed_credits"), (int, float)) else None
     try:
-        balance = _meshy_get("/openapi/v1/balance", key).get("balance")
+        bal = _meshy_get("/openapi/v1/balance", key)
     except (urllib.error.URLError, OSError, ValueError):
-        balance = None
+        bal = None
+    balance = bal.get("balance") if isinstance(bal, dict) and isinstance(bal.get("balance"), (int, float)) else None
     what = str(row.get("prompt") or "").strip()[:80]
     subject = f'Meshy task {task}' + (f' ("{what}")' if what else "")
     out = []
     for aid, label, cost, kinds, message in _ACTIONS:
         if kind not in kinds:
             continue
+        if aid == "regenerate":
+            picked, cost = _regenerate(row, _load_prov().get(task, {}))
+            message = message.replace("{settings}", picked)
         cost = int(spent) if cost is None and spent is not None else cost
         if cost is None:
             continue  # unknown price: never show a button that can't state what it spends
@@ -878,7 +1114,7 @@ _PROV_PARENT = ("preview_task_id", "input_task_id", "rig_task_id")
 _PROV_SETTINGS = ("ai_model", "model_type", "topology", "target_polycount", "texture_resolution", "enable_pbr",
                   "geometry_resolution", "pose_mode", "symmetry_mode", "should_texture", "resize_height",
                   "height_meters", "action_id", "action_ids")
-_SESSION_ID = re.compile(r"^[A-Za-z0-9_.:-]{1,128}$")
+_SESSION_ID = re.compile(r"[A-Za-z0-9_.:-]{1,128}")
 
 
 def _prov_path() -> Path:
@@ -890,7 +1126,7 @@ def _load_prov() -> dict[str, dict]:
         rows = json.loads(_prov_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return {k: v for k, v in rows.items() if isinstance(v, dict) and _TASK_ID.match(k)} if isinstance(rows, dict) else {}
+    return {k: v for k, v in rows.items() if isinstance(v, dict) and _TASK_ID.fullmatch(k)} if isinstance(rows, dict) else {}
 
 
 def _image_ref(args: dict) -> str | None:
@@ -908,14 +1144,14 @@ def _image_ref(args: dict) -> str | None:
 @router.post("/provenance")
 def provenance(body: dict):
     task_id, tool = str(body.get("task_id") or ""), str(body.get("tool") or "")
-    if not _TASK_ID.match(task_id) or not re.fullmatch(r"meshy_[a-z0-9_]{1,40}", tool):
+    if not _TASK_ID.fullmatch(task_id) or not re.fullmatch(r"meshy_[a-z0-9_]{1,40}", tool):
         raise HTTPException(status_code=400, detail="task_id and a meshy_* tool required")
     args = body.get("args") if isinstance(body.get("args"), dict) else {}
     row: dict = {"tool": tool, "recorded_at": int(time.time() * 1000)}
     for key in _PROV_TEXT:
         if isinstance(args.get(key), str) and args[key].strip():
             row[key] = args[key].strip()[:800]
-    parent = next((args[k] for k in _PROV_PARENT if isinstance(args.get(k), str) and _TASK_ID.match(args[k])), None)
+    parent = next((args[k] for k in _PROV_PARENT if isinstance(args.get(k), str) and _TASK_ID.fullmatch(args[k])), None)
     if parent:
         row["parent"] = parent
     if image := _image_ref(args):
@@ -928,15 +1164,18 @@ def provenance(body: dict):
     # Ownership comes from this backend's own sessions, never from the client's guess: Desktop tags a
     # local event with whatever profile/connection is in front when it arrives, so a record is accepted
     # only by the profile whose state.db holds the chat that made it. 409 = keep it and try elsewhere.
-    if not (isinstance(sid, str) and _SESSION_ID.match(sid)) or not _own_session(sid):
+    if not (isinstance(sid, str) and _SESSION_ID.fullmatch(sid)) or not _own_session(sid):
         raise HTTPException(status_code=409, detail="that chat is not on this profile")
     row["session_id"] = sid
     with _STATE_LOCK:  # completions of a parallel tool_call arrive together
         rows = _load_prov()
         rows[task_id] = row
         if len(rows) > _PROV_CAP:
-            rows = dict(sorted(rows.items(), key=lambda kv: kv[1].get("recorded_at") or 0)[-_PROV_CAP:])
-        _write_json(_prov_path(), rows)
+            rows = dict(sorted(rows.items(), key=lambda kv: _as_int(kv[1].get("recorded_at")))[-_PROV_CAP:])
+        try:
+            _write_json(_prov_path(), rows)
+        except OSError as exc:
+            raise _disk_error(exc) from exc
     return {"ok": True}
 
 
@@ -967,7 +1206,7 @@ def _download_lineage(task_id: str) -> tuple[str | None, list[dict]]:
             continue
         if not isinstance(meta, dict):
             continue  # another tool's metadata.json (valid JSON, not a project record)
-        tasks = [t for t in meta.get("tasks") or [] if isinstance(t, dict) and _TASK_ID.match(str(t.get("task_id") or ""))]
+        tasks = [t for t in meta.get("tasks") or [] if isinstance(t, dict) and _TASK_ID.fullmatch(str(t.get("task_id") or ""))]
         if any(t["task_id"] == task_id for t in tasks):
             seen, chain = set(), []
             for t in tasks:
@@ -989,7 +1228,7 @@ def _earlier_in(download_chain: list[dict], task: str) -> list[dict]:
 
 @router.get("/details")
 def details(task: str):
-    if not _TASK_ID.match(task or ""):
+    if not _TASK_ID.fullmatch(task or ""):
         raise HTTPException(status_code=400, detail="task id required")
     prov = _load_prov()
     rec = prov.get(task, {})
@@ -997,7 +1236,7 @@ def details(task: str):
     row: dict = {}
     if key:
         try:
-            row = _task(task, key, include_images=True)
+            row = _task(task, key)
         except HTTPException as exc:
             if exc.status_code in (401, 403):
                 raise
@@ -1086,7 +1325,7 @@ _IMAGE_SAVE_LOCKS: dict[str, threading.Lock] = {}  # one per task: unrelated set
 def save_images(body: dict):
     """Explicitly download every image in a finished image task; never generate or convert."""
     task = str(body.get("task") or "")
-    if not _TASK_ID.match(task):
+    if not _TASK_ID.fullmatch(task):
         raise HTTPException(status_code=400, detail="task id required")
     key = _api_key()
     if not key:
@@ -1094,45 +1333,52 @@ def save_images(body: dict):
     with _STATE_LOCK:
         lock = _IMAGE_SAVE_LOCKS.setdefault(task, threading.Lock())
     with lock:
-        row = _task(task, key, images_only=True)
-        urls = row.get("image_urls")
-        if not isinstance(urls, list) or not urls:
-            raise HTTPException(status_code=404, detail="this task has no generated images")
-        urls = [_asset_url(url) for url in urls]
-        root = _saved_assets_root()
-        folder = root / task
-        if root.is_symlink() or folder.is_symlink():
-            raise HTTPException(status_code=403, detail="image folder must not be a symlink")
-        folder.mkdir(parents=True, exist_ok=True)
-        if folder.resolve() != root.resolve() / task:
-            raise HTTPException(status_code=403, detail="image folder must not be a symlink")
-        outputs = []
-        for index, url in enumerate(urls):
-            ext = Path(urllib.parse.urlsplit(url).path).suffix.lower()
-            if ext not in (".png", ".jpg", ".jpeg", ".webp"):
-                ext = ".png"
-            outputs.append((folder / f"image-{index + 1}{ext}", url))
-        for path, url in outputs:
-            if path.is_symlink():
-                raise HTTPException(status_code=403, detail="image file must not be a symlink")
-            if not path.is_file():
-                _download(url, path)
-            # Record partial successes too: a retry resumes, and already saved views stay usable.
-            names = [p.name for p, _ in outputs if p.is_file() and not p.is_symlink()]
-            record = {"task": task, "prompt": row.get("prompt"), "files": names, "complete": len(names) == len(outputs)}
-            target = folder / "images.json"
-            part = None
-            try:
-                with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder,
-                                                 prefix=".images.", suffix=".part", delete=False) as out:
-                    part = Path(out.name)
-                    json.dump(record, out)
-                part.replace(target)
-            finally:
-                if part is not None:
-                    part.unlink(missing_ok=True)
-        paths = [str(path) for path, _ in outputs]
-        return {"paths": paths, "directory": str(folder), "bytes": sum(path.stat().st_size for path, _ in outputs)}
+        row = _task(task, key)
+        try:
+            return _save_image_set(task, row)
+        except OSError as exc:  # downloads report the network as HTTP errors: this is the local disk
+            raise _disk_error(exc) from exc
+
+
+def _save_image_set(task: str, row: dict) -> dict:
+    urls = row.get("image_urls")
+    if not isinstance(urls, list) or not urls:
+        raise HTTPException(status_code=404, detail="this task has no generated images")
+    urls = [_asset_url(url) for url in urls]
+    root = _saved_assets_root()
+    folder = root / task
+    if root.is_symlink() or folder.is_symlink():
+        raise HTTPException(status_code=403, detail="image folder must not be a symlink")
+    folder.mkdir(parents=True, exist_ok=True)
+    if folder.resolve() != root.resolve() / task:
+        raise HTTPException(status_code=403, detail="image folder must not be a symlink")
+    outputs = []
+    for index, url in enumerate(urls):
+        ext = Path(urllib.parse.urlsplit(url).path).suffix.lower()
+        if ext not in (".png", ".jpg", ".jpeg", ".webp"):
+            ext = ".png"
+        outputs.append((folder / f"image-{index + 1}{ext}", url))
+    for path, url in outputs:
+        if path.is_symlink():
+            raise HTTPException(status_code=403, detail="image file must not be a symlink")
+        if not path.is_file():
+            _download(url, path)
+        # Record partial successes too: a retry resumes, and already saved views stay usable.
+        names = [p.name for p, _ in outputs if p.is_file() and not p.is_symlink()]
+        record = {"task": task, "prompt": row.get("prompt"), "files": names, "complete": len(names) == len(outputs)}
+        target = folder / "images.json"
+        part = None
+        try:
+            with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=folder,
+                                             prefix=".images.", suffix=".part", delete=False) as out:
+                part = Path(out.name)
+                json.dump(record, out)
+            part.replace(target)
+        finally:
+            if part is not None:
+                part.unlink(missing_ok=True)
+    paths = [str(path) for path, _ in outputs]
+    return {"paths": paths, "directory": str(folder), "bytes": sum(path.stat().st_size for path, _ in outputs)}
 
 
 def _saved_images() -> list[dict]:
@@ -1141,7 +1387,7 @@ def _saved_images() -> list[dict]:
         try:
             row = json.loads(manifest.read_text(encoding="utf-8"))
             task = row.get("task")
-            if not isinstance(task, str) or not _TASK_ID.match(task) or task != manifest.parent.name:
+            if not isinstance(task, str) or not _TASK_ID.fullmatch(task) or task != manifest.parent.name:
                 continue
             prompt = row.get("prompt") if isinstance(row.get("prompt"), str) else None
             paths = []
