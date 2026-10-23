@@ -36,7 +36,8 @@ hermes config set MESHY_API_KEY msy_...        # writes the profile's .env
 # or put MESHY_API_KEY=msy_... in ~/.hermes/.env (~/.hermes/profiles/<name>/.env)
 ```
 
-Create the key at meshy.ai → Settings → API. API keys need a Pro plan or above. Then ask, for example, "Make a low-poly treasure chest for Godot" or "Turn
+Create the key at [meshy.ai/developers/keys](https://www.meshy.ai/developers/keys); any paid Meshy
+plan can create one. Then ask, for example, "Make a low-poly treasure chest for Godot" or "Turn
 ~/photos/mug.jpg into a 3D model and get it ready to print at 10 cm".
 
 Requirements: Node.js 18+ with `npx` on PATH. The first start downloads the pinned package
@@ -46,8 +47,10 @@ into npm's cache.
 
 Most Meshy tools spend credits (5–62 per call; the skill's `references/tools.md` lists the
 prices). The plugin marks the server `trust: untrusted`, so Hermes asks before every
-write-capable call (creates, downloads, cancels) with Allow once / Allow for this session /
-Deny. Read-only tools (balance, usage, task status and lists, the animation library, slicer
+write-capable call (creates, downloads, cancels). Each yes covers that one call: in current Hermes
+builds a "for this session" or "always" choice in the prompt (the CLI's session option, the approval
+buttons in Telegram, Discord, Slack and other chat apps) also approves only that call, and the next
+one asks again. Read-only tools (balance, usage, task status and lists, the animation library, slicer
 detection) run without a prompt. The skill also tells the agent to state the cost and get your
 yes before any paid call. Unattended runs (cron, `hermes chat -q`, a gateway with no approver)
 cannot approve, so paid calls are refused there.
@@ -71,6 +74,18 @@ spent, and once a chat would pass the limit Hermes asks again even with the prom
 (your override keeps the plugin's costs unless it sets `tool_costs` / `spend_limit` itself;
 `spend_limit: 0` turns the limit off). Older Hermes builds ignore the declaration.
 
+## Long jobs and chat apps
+
+A Meshy job takes minutes: `meshy_get_task_status` waits up to 300 s per call and Creative Lab waits
+through two stages of up to 600 s each. The plugin declares a 1,500 s call timeout for its server
+(`timeout` in `plugin.json`), so Hermes does not cut those waits off at its 300 s MCP default.
+
+In Telegram, Discord, Slack and other chat apps the skill has the agent reply "started, about N
+min" and end its turn, with a background timer that brings it back to check and deliver, so the chat
+is not blocked meanwhile. Results arrive as attachments (`MEDIA:` lines): the thumbnail as a photo,
+the model file as a document, and for rigged or animated models a short preview video rendered
+locally.
+
 ## Where files go
 
 `meshy_download_model` saves to the absolute `save_to` path the agent passes (the skill asks
@@ -86,13 +101,18 @@ same values:
 
 | Setting | Default | CLI |
 |---|---|---|
-| Meshy API key | — | `hermes config set MESHY_API_KEY msy_...` (stored in `.env`, never `config.yaml`) |
-| Credit balance in the status bar | on | `hermes config set plugins.entries.meshy.settings.show_credits false` |
-| Inline 3D cards in chat | on | `… .settings.inline_viewer false` (directive lines then show as text) |
-| Auto-rotate in the gallery | on | `… .settings.auto_rotate false` |
-| Recent generations shown | 24 | `… .settings.gallery_limit 10` (1–60) |
+| Meshy API key (`api_key`) | — | `hermes config set MESHY_API_KEY msy_...` (stored in `.env`, never `config.yaml`) |
+| Credit balance in the status bar (`show_credits`) | on | `hermes config set plugins.entries.meshy.settings.show_credits false` |
+| Inline 3D cards in chat (`inline_viewer`) | on | `hermes config set plugins.entries.meshy.settings.inline_viewer false` (directive lines then show as text) |
+| Auto-rotate in the gallery (`auto_rotate`) | on | `hermes config set plugins.entries.meshy.settings.auto_rotate false` |
+| Recent generations shown (`gallery_limit`) | 24 | `hermes config set plugins.entries.meshy.settings.gallery_limit 10` (1–60) |
+| Blender optimized copy (`blender_handoff`) | ask | `hermes config set plugins.entries.meshy.settings.blender_handoff always` (`ask`, `always` or `never`) |
+| Default detail level (`default_detail`) | ask | `hermes config set plugins.entries.meshy.settings.default_detail game` (`ask`, `game`, `mobile` or `detailed`) |
+| Blender executable (`blender_path`) | empty (PATH and the usual install folders) | `hermes config set plugins.entries.meshy.settings.blender_path /path/to/blender` |
 
-Desktop applies a saved change immediately; nothing needs a restart.
+Desktop applies a saved change immediately; nothing needs a restart. The agent reads
+`blender_handoff`, `default_detail` and `blender_path` when it needs them, so a change counts from
+the next Meshy job.
 
 ## Hermes Desktop
 
@@ -111,8 +131,12 @@ you get, rendered with stock three.js:
   time. A tick marks formats already on disk.
 - **Meshy 3D gallery** (status-bar chip or ⌘K → "Meshy: open 3D gallery"): your recent
   generations and the models on this machine next to a full viewer, with the same Download menu
-  for any model whose Meshy task is known. "Meshy: view a .glb file…" opens any model on disk.
-  "On this machine" lists the plugin's `meshy_output/` plus every model the viewer has opened or
+  for any model whose Meshy task is known. "Meshy: view a 3D model file…" opens a GLB, glTF, FBX,
+  OBJ (with its .mtl and texture beside it), STL, USDZ or 3MF; against a remote Hermes it sends the
+  file you pick to that machine (stored in the plugin's `uploads/` folder) instead of a local path.
+  The saved-files list ("On this machine", or "On <connection>" for a remote Hermes) shows every
+  format Meshy saved, BLEND included (listed without a 3D preview), and lists the plugin's
+  `meshy_output/` plus every model the viewer has opened or
   saved elsewhere (a project folder): a small per-profile index, `asset-index.json` in the plugin's
   data folder, holds path, size, sha256 and task id only (no URLs, no keys; 500 entries, vanished
   files drop out). Nothing scans your home folder.
@@ -125,6 +149,9 @@ you get, rendered with stock three.js:
   `provenance.json` in its data folder (prompt, settings, parent task, the image path or the image
   URL without its query string; 2,000 entries). Models made before this or from another machine
   show what Meshy and the download folder still know.
+  On a remote Hermes, "Show in folder" cannot open that machine's folders: Desktop shows where the
+  file is and copies the path instead. Binary USDZ (USDC) does not preview yet (three.js's reader is
+  a stub); open the GLB.
 - **Credit chip** in the status bar, refreshed after every Meshy tool call.
 
 ### Images and saved assets
