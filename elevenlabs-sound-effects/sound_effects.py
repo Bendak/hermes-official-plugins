@@ -51,6 +51,10 @@ _DEADLINE_SECONDS = 180.0
 MAX_AUDIO_BYTES = 50 * 1024 * 1024
 
 
+# Live, a model retried an unanswered call 3-4 times (7-9 minutes of waiting) without this.
+_NO_RETRY = "Retrying right away will not help: tell the user and let them decide when to try again."
+
+
 class ResponseRefused(Exception):
     """The endpoint answered, but with a body over the size cap or past the deadline."""
 
@@ -71,7 +75,10 @@ SCHEMA = {
                        "description": "What the sound effect should sound like (at most 450 characters)."},
             "duration_seconds": {
                 "type": "number", "minimum": MIN_SECONDS, "maximum": MAX_SECONDS,
-                "description": "Length in seconds (0.5-30). Omit to let ElevenLabs pick from the prompt.",
+                "description": (
+                    "Length in seconds (0.5-30). Set it whenever the user names a length: ElevenLabs does "
+                    "not read the length from the prompt text, and an omitted length is billed at a flat "
+                    "rate that costs more than a short clip. Omit only to let ElevenLabs pick."),
             },
             "loop": {
                 "type": "boolean",
@@ -266,8 +273,11 @@ def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -
 
     api_key = (get_secret(API_KEY_ENV, "") or "").strip()
     if not api_key:
-        return tool_error(f"{API_KEY_ENV} is not set. Add your ElevenLabs API key with "
-                          f"`hermes config set {API_KEY_ENV} <key>` or in Settings → Plugins.")
+        from hermes_constants import display_hermes_home
+
+        return tool_error(f"{API_KEY_ENV} is not set for this profile. Add your ElevenLabs API key to "
+                          f"{display_hermes_home()}/.env (`hermes [-p <profile>] config set {API_KEY_ENV} <key>`) "
+                          f"or in Settings → Plugins.")
     if not (api_key.isascii() and api_key.isprintable()):
         return tool_error(f"{API_KEY_ENV} contains characters an API key cannot have; re-enter the key.")
     try:
@@ -279,12 +289,16 @@ def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -
         body = build_request(args, model)
     except ValueError as exc:
         return tool_error(str(exc))
+    where = _display_url(base_url)
     try:
         status, audio, reason, headers = _download(base_url, output_format, body, api_key)
     except ResponseRefused as exc:
-        return tool_error(f"ElevenLabs at {_display_url(base_url)}: {exc}")
+        return tool_error(f"ElevenLabs ({where}): {exc}. {_NO_RETRY}")
+    except httpx.TimeoutException as exc:
+        return tool_error(f"ElevenLabs ({where}) did not answer within {_CONNECT_READ_TIMEOUT:g} seconds "
+                          f"({type(exc).__name__}). {_NO_RETRY}")
     except (httpx.HTTPError, httpx.InvalidURL) as exc:  # exception text can echo request headers: name the class only
-        return tool_error(f"Could not reach ElevenLabs at {_display_url(base_url)}: {type(exc).__name__}")
+        return tool_error(f"Could not reach ElevenLabs ({where}): {type(exc).__name__}. {_NO_RETRY}")
     if status != 200:
         return tool_error(_api_error(status, audio, reason))
     if not audio:

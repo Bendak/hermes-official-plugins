@@ -265,3 +265,39 @@ def test_overlong_prompts_never_leave_and_key_errors_say_which_fix(loaded, stand
         error = call({"prompt": "thunder"})["error"]
         assert message in error and fix in error, error
         assert code == "quota_exceeded" or "credits" not in error, error
+
+
+def test_unanswered_calls_say_dont_retry_and_missing_keys_name_the_profile(loaded, stand_ins, monkeypatch,
+                                                                           _hermes_home):
+    """Live, a model retried an unanswered call 3-4 times (7-9 minutes) when the error only said
+    "Could not reach ElevenLabs", which is also wrong for a server that answered and then stalled.
+    A missing key names the calling profile's .env, not the default profile's."""
+    from hermes_constants import reset_hermes_home_override, set_hermes_home_override
+
+    entry, call = loaded
+    plugin = entry.handler.__globals__["_sfx"]
+    monkeypatch.setattr(plugin, "_CONNECT_READ_TIMEOUT", 0.5)
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "xi-test-key")
+
+    def stall_after_headers(handler):
+        handler.send_response(200)
+        handler.send_header("Content-Length", "1000")
+        handler.end_headers()
+        handler.wfile.flush()
+        time.sleep(3)
+
+    stand_ins[0].reply = stall_after_headers
+    error = call({"prompt": "thunder"})["error"]
+    assert "did not answer within 0.5 seconds" in error and "Could not reach" not in error, error
+    assert "Retrying right away will not help" in error
+    monkeypatch.setattr(plugin, "_DEADLINE_SECONDS", 0.2)
+    assert "Retrying right away will not help" in call({"prompt": "thunder"})["error"]
+    assert "billed" in entry.schema["parameters"]["properties"]["duration_seconds"]["description"]
+
+    monkeypatch.delenv("ELEVENLABS_API_KEY")
+    assert "~/.hermes/.env" in call({"prompt": "thunder"})["error"]
+    token = set_hermes_home_override(_hermes_home / "profiles" / "b")
+    try:
+        assert "~/.hermes/profiles/b/.env" in call({"prompt": "thunder"})["error"]
+    finally:
+        reset_hermes_home_override(token)
