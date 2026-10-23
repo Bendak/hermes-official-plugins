@@ -129,6 +129,20 @@ class TestDeadTab:
         assert [c["path"] for c in camofox.calls("POST", "/type")] == ["/tabs/tab-1/type"]
         assert client.get_session("t1")["tab_id"] == "reopened"
 
+    def test_scroll_stops_at_the_replaced_tab_and_says_so(self, camofox, monkeypatch):
+        """browser_scroll is five REST steps; the tab-changed refusal of the first must be the result,
+        not four silent scrolls of the replacement tab ending in success."""
+        self._reopened(camofox, monkeypatch)
+        result = json.loads(t.browser_scroll("down", task_id="t1"))
+        assert result["success"] is False and "call browser_snapshot" in result["error"]
+        assert [c["path"] for c in camofox.calls("POST", "/scroll")] == ["/tabs/tab-1/scroll"]
+
+    def test_scroll_on_a_reaped_tab_says_navigate_again(self, camofox):
+        t.browser_navigate("https://example.com", task_id="t1")
+        camofox.tabs.clear()
+        result = json.loads(t.browser_scroll("down", task_id="t1"))
+        assert result["success"] is False and "Call browser_navigate to open the page again" in result["error"]
+
     def test_a_404_on_a_live_tab_is_reported_as_is(self, camofox):
         t.browser_navigate("https://example.com", task_id="t1")
         camofox.overrides[("POST", "/tabs/tab-1/click")] = (404, {"error": "ref e9 not found"})
