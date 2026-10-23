@@ -184,7 +184,7 @@ _CASES = [  # type, fields, has_model
     ("uv-unwrap", {"model_urls": {"glb": "G"}}, True),
     ("print-repair", {"model_urls": {"glb": "G", "stl": "S"}}, True),
     ("print-split", {"model_urls": {"glb": "G"}, "part_count": 3}, True),
-    ("print-multi-color", {"model_urls": {"3mf": "M"}}, False),
+    ("print-multi-color", {"model_urls": {"3mf": "M"}}, True),  # 3MF is viewable (item 13)
     ("text-to-motion", {"result": {"motion_url": "F", "motion_format": "fbx"}}, False),
     ("creative-lab-figure-build", {"model_urls": {"glb": "G", "obj": "O"}}, True),
     ("creative-lab-lamp-prototype", {"image_urls": ["I"]}, False),
@@ -354,3 +354,23 @@ def test_meshy_answers_of_the_wrong_shape_never_raise(api, meshy):
     assert isinstance(api.models(limit=5)["models"], list)
     meshy.overrides[f"/openapi/v1/image-to-3d/{_tid(51)}"] = (200, {}, b"<html>not json</html>")
     assert _status(api.task_state, _tid(51)).status_code == 502
+
+
+def test_a_task_without_a_glb_is_viewable_in_its_best_format(api, meshy):
+    # Meshy's documented Convert record lists only the formats it made; the card's own Convert row makes these.
+    task = meshy.add("convert", 7, model_urls={"fbx": _asset(meshy, "c.fbx"), "stl": _asset(meshy, "c.stl")})
+    got = api.task_state(task)
+    assert (got["has_model"], got["view_format"]) == (True, "fbx")
+    assert [r["glb_url"] for r in api.models(limit=60)["models"] if r["task_id"] == task] == [_asset(meshy, "c.fbx")]
+
+
+def test_a_rejected_key_is_a_permanent_4xx_and_a_plan_gated_route_is_not(api, meshy):
+    task = meshy.add("convert", 8, model_urls={"glb": _asset(meshy, "m.glb")})
+    # A route this key's plan cannot read answers 403; the task is still found on its own route.
+    meshy.overrides[f"/openapi/v1/image-to-3d/{task}"] = (403, {}, b"{}")
+    assert api.task_state(task)["has_model"]
+    # A revoked key (401 everywhere): a 4xx the card stops on, never a 502 it retries forever.
+    meshy.owner_key = "msy_revoked"
+    meshy.overrides = {f"/openapi/v1/image-to-3d/{_tid(9)}": (401, {}, b"{}")}
+    err = _status(api.task_state, _tid(9))
+    assert (err.status_code, err.detail) == (403, "Meshy rejected the API key")

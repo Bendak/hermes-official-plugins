@@ -9,6 +9,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 import type { ChatSender } from './chat.ts'
 import { stageWord } from './progress.tsx'
+import { openFormat } from './formats.ts'
 import { createTaskPoller, type PollState } from './task-poll.ts'
 import { ActionMenu, errorText, type FilePayload, FormatMenu, ModelViewer, type Os, type Rest, type Source, V } from './views.tsx'
 
@@ -22,6 +23,8 @@ interface TaskInfo {
   thumbnail: null | string
   credits: null | number
   has_model: boolean
+  /** Best format the viewer can open (backend 0.5+); a Convert task may carry FBX/STL and no GLB. */
+  view_format?: null | string
   error: null | string
 }
 
@@ -104,7 +107,7 @@ export function TaskCard({
     setOpening(true)
     setOpenError(null)
     try {
-      const r = await rest<{ path: string }>('save', { method: 'POST', body: { task, format: 'glb' }, timeoutMs: 180_000 })
+      const r = await rest<{ path: string }>('save', { method: 'POST', body: { task, format: openFormat(info) }, timeoutMs: 180_000 })
       const s: Source = { kind: 'file', path: r.path, task }
       setSource(s)
       then(s)

@@ -322,6 +322,7 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
         # A rig's bind-pose character sits still; its walking clip shows what the rig is for.
         clips = [u for k, u in sorted(urls.items()) if k.startswith("glb:")]
         glb = (clips[-1] if clips and task_type == "rigging" else None) or urls.get("glb") or next(iter(clips), None)
+        glb = glb or urls.get(_viewable_format(urls) or "")  # a Convert/print task may carry no GLB
         images = [u for u in (row.get("image_urls") or []) if isinstance(u, str) and u]
         expires = row.get("expires_at")
         merged.append({"task_id": row.get("id"), "task_type": label_type, "prompt": row.get("prompt") or _clip_label(urls),
@@ -571,6 +572,15 @@ def _result_urls(row: dict) -> dict[str, str]:
     return out
 
 
+# The model formats Desktop's viewer opens, best first (src/formats.ts ranks them the same way).
+_VIEW_ORDER = ("glb", "gltf", "fbx", "usdz", "obj", "3mf", "stl")
+
+
+def _viewable_format(urls: dict[str, str]) -> str | None:
+    """The best main-model format a task carries; a Convert task lists only the formats it made."""
+    return next((f for f in _VIEW_ORDER if f in urls), None)
+
+
 def _clip_label(urls: dict[str, str]) -> str:
     """A rig/animation task has no prompt; name it by the clips it carries (``walking, running``)."""
     clips = sorted({_split_format(k)[1] for k in urls if ":" in k} - {None})
@@ -614,8 +624,11 @@ def _task_at(route: str, task_id: str, key: str) -> dict | None:
     try:
         row = _meshy_get(f"{route}/{task_id}", key)
     except urllib.error.HTTPError as exc:
-        if exc.code in (400, 404):
+        # 403 is a route this key's plan cannot read (or another account's task): not on this route.
+        if exc.code in (400, 403, 404):
             return None
+        if exc.code == 401:  # a revoked or mistyped key: permanent until the user fixes it, so a 4xx
+            raise HTTPException(status_code=403, detail="Meshy rejected the API key") from exc
         raise _meshy_error(exc) from exc
     except (urllib.error.URLError, OSError, ValueError) as exc:
         raise _meshy_error(exc) from exc
@@ -952,13 +965,14 @@ def task_state(task: str):
     status = str(row.get("status") or "")
     error = row.get("task_error") if isinstance(row.get("task_error"), dict) else {}
     urls = _result_urls(row) if status == "SUCCEEDED" else {}
+    view = _viewable_format(urls)
     return {
         "task": task, "status": status, "progress": _as_int(row.get("progress")),
         "type": str(row.get("type") or ""), "stage": str(row.get("mode") or row.get("type") or ""),
         "prompt": str(row.get("prompt") or "")[:200] or _clip_label(urls) or None,
         "thumbnail": row.get("thumbnail_url") if isinstance(row.get("thumbnail_url"), str) else None,
         "credits": row.get("consumed_credits"),
-        "has_model": "glb" in urls,
+        "has_model": view is not None, "view_format": view,
         "error": (str(error.get("message") or "") or status.lower()) if status in _TERMINAL_FAILED else None,
     }
 
@@ -1471,22 +1485,24 @@ def _store_upload(filename: str, data: bytes) -> dict:
     root = base / _UPLOAD_DIR
     if root.is_symlink():
         raise HTTPException(status_code=403, detail="upload folder must not be a symlink")
-    root.mkdir(parents=True, exist_ok=True)
-    if root.resolve() != base.resolve() / _UPLOAD_DIR:
-        raise HTTPException(status_code=403, detail="upload folder must not be a symlink")
-    import hashlib
-    dest = root / f"{hashlib.sha256(data).hexdigest()[:16]}-{name}"
-    if dest.is_symlink():
-        raise HTTPException(status_code=403, detail="upload target must not be a symlink")
-    if not (dest.is_file() and dest.stat().st_size == len(data)):
-        fd, part = _staging(dest)
-        try:
-            with open(fd, "wb") as out:
-                out.write(data)
-            os.replace(part, dest)
-        finally:
-            part.unlink(missing_ok=True)
-    _record_asset(dest)
+    try:
+        root.mkdir(parents=True, exist_ok=True)
+        if root.resolve() != base.resolve() / _UPLOAD_DIR:
+            raise HTTPException(status_code=403, detail="upload folder must not be a symlink")
+        dest = root / f"{hashlib.sha256(data).hexdigest()[:16]}-{name}"
+        if dest.is_symlink():
+            raise HTTPException(status_code=403, detail="upload target must not be a symlink")
+        if not (dest.is_file() and dest.stat().st_size == len(data)):
+            fd, part = _staging(dest)
+            try:
+                with open(fd, "wb") as out:
+                    out.write(data)
+                os.replace(part, dest)
+            finally:
+                part.unlink(missing_ok=True)
+        _record_asset(dest)
+    except OSError as exc:  # a full disk or an unwritable data folder: a JSON error, not a raw 500
+        raise _disk_error(exc) from exc
     return {"path": str(dest), "name": name, "bytes": len(data)}
 
 

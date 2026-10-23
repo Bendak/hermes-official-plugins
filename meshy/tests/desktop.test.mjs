@@ -4,7 +4,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { cardChat, OPEN_RETRIES, recordedChat } from '../src/chat.ts'
-import { bestForTask, canRender, formatOf, mtlLibOf, mtlTextures, siblingPath } from '../src/formats.ts'
+import { bestForTask, canRender, openFormat, formatOf, mtlLibOf, mtlTextures, siblingPath } from '../src/formats.ts'
 import { localHeading, reconcileSelection } from '../src/gallery.ts'
 import { createLocalityTracker, localityOf, locatingOs, watchScope } from '../src/scope.ts'
 import { createStatusStore, DEFAULT_SETTINGS } from '../src/status.ts'
@@ -569,4 +569,12 @@ test('reuse-prompt inserts into the recorded chat (opening it) and into the card
   const card = fakeDesktop({ focused: 'B' })
   await cardChat(card, 'A').insert('p')
   assert.deepEqual(card.calls, [['insertText', 'A', 'p', 'block']])
+})
+
+test('a task card opens the format the backend picked, and GLB on older backends', () => {
+  assert.equal(openFormat({ view_format: 'fbx' }), 'fbx') // a Convert-to-FBX task carries no GLB
+  assert.equal(openFormat({ view_format: 'stl' }), 'stl')
+  assert.equal(openFormat({}), 'glb') // older backend: no view_format
+  assert.equal(openFormat(null), 'glb')
+  assert.equal(openFormat({ view_format: 'blend' }), 'glb') // never ask /save for a format the viewer cannot draw
 })
