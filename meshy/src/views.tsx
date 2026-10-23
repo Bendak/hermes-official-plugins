@@ -1116,7 +1116,7 @@ export function Gallery({
             {selTask && !(selected.media === 'image' || (selected.kind === 'remote' && selected.expired)) && (
               <FormatMenu
                 onSaved={refresh}
-                beside={selected.kind === 'file' ? selected.path : undefined}
+                beside={selected.kind === 'file' && canRender(selected.path) ? selected.path : undefined}
                 key={`${selTask.task}:${selected.kind === 'file' ? selected.path : ''}`}
                 os={os}
                 rest={rest}
