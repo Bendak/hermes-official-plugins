@@ -12,7 +12,7 @@
  * `ctx.rest`; the renderer never reads files or holds the API key.
  */
 
-import type { HermesPlugin, PaletteContribution } from '@hermes/plugin-sdk'
+import type { HermesPlugin, PaletteContribution, TranscriptDirectiveProps } from '@hermes/plugin-sdk'
 import { host, PALETTE_AREA, STATUSBAR_AREAS, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 
@@ -102,6 +102,9 @@ const plugin: HermesPlugin = {
         return
       }
       closeWorkspace = host.openWorkspace(WORKSPACE_ID, {
+        // Beside the chat, not over it: gallery buttons send to (and may open) the chat that made a model, which
+        // must stay visible next to the gallery. Desktops before the dock option ignore it.
+        dock: { pane: 'workspace', pos: 'right' },
         title: source ? `Meshy · ${title}` : title,
         minWidth: '28rem',
         onClose: () => {
@@ -183,7 +186,7 @@ const plugin: HermesPlugin = {
         }
       }
     })
-    function DirectiveCard({ attrs, source, streaming }: { attrs: Readonly<Record<string, string>>; source: string; streaming: boolean }) {
+    function DirectiveCard({ attrs, source, streaming, sessionId }: TranscriptDirectiveProps) {
       const prefs = useSettings()
       if (!prefs.inline_viewer) {
         return <p>{source}</p>
@@ -194,6 +197,7 @@ const plugin: HermesPlugin = {
           openInWorkspace={(src, title) => openGallery(src, title)}
           os={os}
           rest={ctx.rest}
+          sessionId={sessionId}
           streaming={streaming}
         />
       )
@@ -217,8 +221,9 @@ const plugin: HermesPlugin = {
         area: TRANSCRIPT_DIRECTIVE_AREA,
         data: {
           name: 'meshy-model',
-          render: ({ attrs, source, streaming }: { attrs: Readonly<Record<string, string>>; source: string; streaming: boolean }) => (
-            <DirectiveCard attrs={attrs} source={source} streaming={streaming} />
+          // `sessionId` names the chat showing the card (newer Desktops; undefined before them): card buttons send there.
+          render: ({ attrs, source, streaming, sessionId }: TranscriptDirectiveProps) => (
+            <DirectiveCard attrs={attrs} sessionId={sessionId} source={source} streaming={streaming} />
           )
         }
       },

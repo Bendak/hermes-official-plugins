@@ -55,6 +55,15 @@ export interface HermesPlugin {
   defaultEnabled?: boolean
   register: (ctx: PluginContext) => void
 }
+/** Props a TRANSCRIPT_DIRECTIVE_AREA `render` receives (apps/desktop/src/lib/transcript-directives.ts). */
+export interface TranscriptDirectiveProps {
+  attrs: Readonly<Record<string, string>>
+  source: string
+  streaming: boolean
+  /** The chat whose transcript shows the directive (stored id, else runtime id; null before it has a session).
+   *  Newer Desktops only: undefined on older ones. */
+  sessionId?: null | string
+}
 export interface PaletteContribution {
   id: string
   label: string
@@ -80,7 +89,14 @@ export const host: {
   notify: (input: { kind: 'error' | 'info' | 'success' | 'warning'; message: string }) => string
   openWorkspace?: (
     id: string,
-    options: { minWidth?: string; onClose?: () => void; render: () => ReactNode; title?: string }
+    options: {
+      /** Where the tile docks (newer Desktops; older ones ignore it and use their default). */
+      dock?: { before?: null | string; pane: string; pos: 'bottom' | 'center' | 'left' | 'right' | 'top' }
+      minWidth?: string
+      onClose?: () => void
+      render: () => ReactNode
+      title?: string
+    }
   ) => () => void
 }
 export function Button(
