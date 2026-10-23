@@ -8,8 +8,9 @@ Routes:
     GET /status             key configured? + balance (no key → configured: false, never an error)
                             + the user's Settings ▸ Plugins ▸ Meshy preferences
     GET /models?limit=      recent finished Meshy generations: task id, type, prompt, thumbnail, credits
-    GET /local?limit=       .glb files under the plugin's meshy_output/ (the server's default download dir),
-                            plus models in the asset index (project folders), each with its Meshy task id when known
+    GET /local?limit=       saved models (GLB, glTF, FBX, OBJ, STL, USDZ, 3MF, BLEND) under the plugin's meshy_output/
+                            (the server's default download dir) plus models in the asset index (project folders),
+                            each with its Meshy task id when known and whether the viewer can draw it
     GET /file?path=&task=   bytes of one model (.glb/.gltf/.fbx/.obj/.stl/.usdz/.3mf), an OBJ's .mtl, or an image
                             (data URL), refused outside allowed roots; a served model is recorded in the
                             profile's asset index (path, size, sha256, task)
