@@ -3,11 +3,12 @@
 Some binds name a host path that configuration or the environment chose
 rather than the backend: the trust-anchor files of CA_BUNDLE_VARS
 (SSL_CERT_FILE and the rest), the Hermes scratch directory under
-HERMES_HOME, and the operator's ``binds`` setting. bwrap resolves a bind
+HERMES_HOME, the profile home under ``terminal.home_mode: profile`` and
+the operator's ``binds`` setting. bwrap resolves a bind
 source on the host at every spawn, with symlinks followed, so a name that
 leads into a hidden path mounts that path, and a name that lies in a
 directory a sandbox can write to lets a command choose what the next spawn
-mounts. Every such bind goes through :func:`validated_bind_source` once,
+mounts. Every such bind goes through :func:`bind_refusal` once,
 at environment construction, and the argv carries the path it returned,
 never the name.
 
@@ -25,10 +26,12 @@ from . import home as bubblewrap_home
 
 logger = logging.getLogger(__name__)
 
-# Kinds of host path a bind expects.
+# Kinds of host path a bind expects. The trust anchors and the scratch
+# directory are a FILE or a DIRECTORY; an operator bind may name any
+# existing path, a unix socket, a FIFO or a device node included.
 FILE = "file"
 DIRECTORY = "directory"
-ANY = "file or directory"
+ANY = "any existing path"
 
 
 def _is_within(path: str, root: str) -> bool:
@@ -54,9 +57,11 @@ class BindGuard:
     *masks*: every hidden path, the Hermes homes included. A path below one
     of them is out of a sandbox's reach even inside a writable root: the
     overlay covers it and the pins hold its parents in place.
-    *writable*: directories a sandbox can write to: the working directory
-    under a writable profile, read-write operator bind sources, the profile
-    home under a profile home_mode, the shared scratch directory (every
+    *writable*: directories a sandbox of this profile can write to: the
+    working directory of every sandbox under a writable profile (this
+    one's, the configured one's and those of the other sandboxes this
+    process made), read-write operator bind sources, the profile home
+    under a profile home_mode, the shared scratch directory (every
     sandbox's own scratch lives in it) and the sandbox directory (every
     environment's state lives in it).
     *home_root* and *home_allow*: the HOME the default-deny layout covers
@@ -107,8 +112,6 @@ def _kind_problem(real: str, kind: str) -> str | None:
         return "it is not a regular file"
     if kind == DIRECTORY and not os.path.isdir(real):
         return "it is not a directory"
-    if kind == ANY and not (os.path.isfile(real) or os.path.isdir(real)):
-        return "it is neither a regular file nor a directory"
     return None
 
 
@@ -154,6 +157,32 @@ def _refusal(
     return None
 
 
+def bind_refusal(
+    path: str,
+    guard: BindGuard,
+    *,
+    kind: str = FILE,
+    public: Sequence[str] = (),
+    dest: str | None = None,
+    hidden_rules: bool = True,
+) -> tuple[str, str | None]:
+    """Resolve *path* once: ``(real path, None)`` when it may be bound, ``(real path, reason)`` otherwise.
+
+    The bind takes the returned path as its source, never *path*: bwrap
+    follows symlinks in a source at every spawn, and a link a command can
+    rewrite would choose the next mount. Refused: a path missing on the
+    host, one that is not of *kind*, one that lies in a directory a sandbox
+    can write to (unless bound at its own path, *dest*, directly under such
+    a root), and with *hidden_rules* one that lies in a credential store,
+    in a hidden Hermes home outside the *public* roots, or in a dot entry
+    of HOME off the allowlist, and a directory that holds any of those.
+    """
+    real = os.path.realpath(os.path.abspath(os.path.expanduser(path)))
+    if not os.path.exists(real):
+        return real, f"{real} does not exist"
+    return real, _refusal(real, guard, kind=kind, public=public, dest=dest, hidden_rules=hidden_rules)
+
+
 def validated_bind_source(
     label: str,
     path: str,
@@ -164,26 +193,14 @@ def validated_bind_source(
     dest: str | None = None,
     hidden_rules: bool = True,
 ) -> str | None:
-    """Resolve *path* once and return the real path to bind, or None with one warning.
+    """The real path to bind for *path* (see :func:`bind_refusal`), or None with one warning.
 
-    The bind takes the returned path as its source, never *path*: bwrap
-    follows symlinks in a source at every spawn, and a link a command can
-    rewrite would choose the next mount. Refused: a path missing on the
-    host, one that is not of *kind*, one that lies in a directory a sandbox
-    can write to (unless bound at its own path, *dest*, directly under such
-    a root), and with *hidden_rules* one that lies in a credential store,
-    in a hidden Hermes home outside the *public* roots, or in a dot entry
-    of HOME off the allowlist, and a directory that holds any of those.
-    *label* names the setting or variable in the warning.
-
-    A refusal skips the bind and leaves the sandbox running.
+    For a bind whose absence only takes access away (a trust anchor, the
+    scratch dir, a read-write operator bind): the refusal skips the bind and
+    leaves the sandbox running. *label* names the setting or variable in
+    the warning.
     """
-    given = os.path.abspath(os.path.expanduser(path))
-    real = os.path.realpath(given)
-    if not os.path.exists(real):
-        reason = f"{real} does not exist"
-    else:
-        reason = _refusal(real, guard, kind=kind, public=public, dest=dest, hidden_rules=hidden_rules)
+    real, reason = bind_refusal(path, guard, kind=kind, public=public, dest=dest, hidden_rules=hidden_rules)
     if reason is None:
         return real
     logger.warning("bubblewrap: not binding %s (%s): %s", label, path, reason)

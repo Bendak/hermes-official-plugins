@@ -62,8 +62,8 @@ Each command gets:
 - **A private pid namespace and `/proc`**: the command cannot see or signal host processes. Every other
   namespace is unshared too (IPC, UTS, cgroup, user, and network unless the profile shares it).
 - **A fresh `/dev` and a fresh `/tmp` per command.** Nothing written to `/tmp` survives the command; use
-  the working directory, or `$TMPDIR` (the sandbox's own scratch directory, which persists between
-  its commands).
+  the working directory, or `$TMPDIR` (the Hermes scratch directory, which inside the sandbox is the
+  sandbox's own and persists between its commands).
 - **No agent or bus sockets**: `/run/user/<uid>` is an empty tmpfs, so the gpg-agent, ssh-agent,
   keyring and D-Bus sockets there are unreachable, and `SSH_AUTH_SOCK`, `GPG_AGENT_INFO` and
   `DBUS_SESSION_BUS_ADDRESS` are removed from the environment (again after your shell rc files run).
@@ -129,20 +129,28 @@ on the host shows up in the next command.
 ### The Hermes home
 
 The Hermes home (`HERMES_HOME`, normally `.hermes` in your home directory) is hidden as well. Two
-directories under it stay reachable at their own paths: the backend's own state directory
-(`HERMES_HOME/sandboxes/bwrap-*`) and the sandbox's own scratch directory. The Hermes scratch
-directory (`HERMES_HOME/cache/scratch`) is shared by every Hermes process and session, so inside a
-sandbox it is an empty, read-only directory that holds one entry: `hermes-bwrap-<id>`, the scratch
-directory of that sandbox alone, at the same path as on the host. `TMPDIR`, `TMP` and `TEMP` point
-there when Hermes set them to the shared directory; it is writable whenever the working directory is
-and keeps its files between commands, also when Hermes makes the session's sandbox again after the
-idle timeout. One session's scratch files are not visible to another session's sandbox. Unused for a
-day, the directory is removed by Hermes' scratch pruning. With
+directories under it stay reachable: the backend's own state directory
+(`HERMES_HOME/sandboxes/bwrap-*`) and the Hermes scratch directory (`HERMES_HOME/cache/scratch`, the
+path Hermes names in its system prompt and points `TMPDIR`, `TMP` and `TEMP` at). On the host the
+scratch directory is shared by every Hermes process and session, so the sandbox mounts its own
+directory there instead: `hermes-bwrap-session-<digest>` in the shared directory on the host, named
+after the terminal session and the Hermes process (`hermes-bwrap-<id>` for an environment built
+without a session). Inside the sandbox the scratch path is writable whenever the working directory
+is, read-only under `restricted`, and keeps its files between commands, also when Hermes makes the
+session's sandbox again after the idle timeout. Files other sessions and Hermes processes keep in the
+shared directory are not visible. "Session" is the terminal session Hermes keys environments by: the
+CLI, cron jobs and subagents share their parent's, so they share one scratch directory as they share
+one sandbox. Unused for a day, the directory is removed by Hermes' scratch pruning. With
 `terminal.home_mode: profile`, `HERMES_HOME/home` is the subprocess `HOME` and stays readable and
 writable; the rest of `HERMES_HOME` stays hidden, the files other sessions staged there (attachments,
 cached documents, images, pastes) included. When `HERMES_HOME` points elsewhere (a profile under
 `.hermes/profiles/<name>`), the default `.hermes` is hidden too, so a profile's sandbox cannot read the
 default home's `.env` or `auth.json`.
+
+Each sandbox sees only its own state directory: when `terminal.sandbox_dir` lies outside the hidden
+set, it is an empty read-only directory inside the sandbox with that one entry, so no sandbox reads
+another one's shell snapshot or `execute_code` files. Such a sandbox directory must not hold the
+working directory, the home directory or a bind destination, or the backend refuses to start.
 
 A hidden path that does not exist on the host is skipped. An entry that is a symlink (a dotfiles
 repository linking `.ssh` to `dotfiles/ssh`) is hidden at its target, resolved when the backend
@@ -157,19 +165,24 @@ Hermes home) is bound back read-only, so TLS keeps working under the `network` p
 
 ### Paths named by settings and variables
 
-The CA bundle variables above, the Hermes scratch directory and the `binds` sources name host paths
-that the backend mounts. Each one is resolved once, when the backend starts, and the mount uses the
-resolved path, so a symlink changed later cannot redirect it. The backend skips the mount, with one
-warning in the log, and runs the sandbox without it when the path:
+The CA bundle variables above, the Hermes scratch directory, the profile home and the `binds` sources
+name host paths that the backend mounts. Each one is resolved once, when the backend starts, and the
+mount uses the resolved path, so a symlink changed later cannot redirect it. A path is refused when it:
 
-- is not a regular file (a directory for `SSL_CERT_DIR` and the scratch directory) or is missing;
-- lies in a directory a sandbox can write to (the working directory, a read-write bind, the profile
-  home, the Hermes scratch directory, the sandbox directory), where a command could swap it before the
-  next command; a `binds` source bound at its own path directly under such a directory is the
-  exception, since it cannot be renamed while mounted;
-- for a CA bundle or the scratch directory: resolves into a credential store, into a dot entry of the
-  home directory that is not allowed, or into the Hermes home outside the Python environment Hermes
-  runs from (credentials, transcripts and the other profiles live there).
+- is missing, or for a CA bundle or the scratch directory is not a regular file (a directory for
+  `SSL_CERT_DIR` and the scratch directory); a `binds` source may be any existing path, a Unix socket,
+  a FIFO or a device node included;
+- lies in a directory a sandbox of this profile can write to (the working directory of any of its
+  sandboxes, a read-write bind, the profile home, the Hermes scratch directory, the sandbox directory),
+  where a command could swap it before the next command; a `binds` source bound at its own path
+  directly under such a directory is the exception, since it cannot be renamed while mounted;
+- for a CA bundle, the scratch directory or the profile home: resolves into a credential store, into a
+  dot entry of the home directory that is not allowed, or into the Hermes home outside the Python
+  environment Hermes runs from (credentials, transcripts and the other profiles live there).
+
+A refused read-only `binds` entry or profile home stops the backend with an error naming it: skipping
+a read-only bind would leave the path as writable as the directory around it. Any other refused path
+is skipped with one warning in the log, and the sandbox runs without it.
 
 A CA bundle you keep in the Hermes home therefore needs to move elsewhere (for example
 `/usr/local/share/ca-certificates`), and one in a dot directory needs that directory in `home_allow`.
@@ -245,14 +258,19 @@ own location, so a copy of the tree elsewhere would show them. Bind such a sourc
 instead. Because the root is read-only, a `dest` must already exist on the host or sit under a
 writable mount.
 
-A read-write bind whose source lies inside the working directory, inside another read-write bind or
-inside the profile home is refused unless it has `dest` equal to `src` and sits directly under that
-directory with no symlink on the way: bwrap resolves a bind source on the host for every command, so a
-source a command can rename or replace with a symlink would let it choose what the next command
-mounts. A read-only bind with such a source is skipped with a warning for the same reason (see
-[Paths named by settings and variables](#paths-named-by-settings-and-variables)); bind it at its own
-path instead, and a missing source is skipped the same way rather than failing every command. Under `terminal.home_mode: profile`, `HERMES_HOME/home` must be a plain directory or a link to
-a directory outside the hidden set, or the backend refuses to start.
+A source may be a directory, a file, a Unix socket (a service or agent socket you choose to share), a
+FIFO or a device node.
+
+A bind whose source lies inside the working directory of a sandbox of this profile, inside another
+read-write bind or inside the profile home is refused, and the backend does not start, unless it has
+`dest` equal to `src` and sits directly under that directory with no symlink on the way: bwrap
+resolves a bind source on the host for every command, so a source a command can rename or replace
+with a symlink would let it choose what the next command mounts (see
+[Paths named by settings and variables](#paths-named-by-settings-and-variables)). A missing source
+stops the backend too when the bind is read-only, and is skipped with a warning when it is read-write.
+Under `terminal.home_mode: profile`, `HERMES_HOME/home` must be a plain directory or a link to a
+directory outside the hidden set and outside every directory a sandbox can write to, or the backend
+refuses to start.
 
 ## Resource limits
 

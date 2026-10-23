@@ -350,7 +350,7 @@ class TestConstructionTimeMounts:
         # ever comes from inside a sandbox.
         assert params == ["config", "initial_cwd", "state_dir", "home", "hermes_home", "tracked_cwd", "bwrap_path",
                           "hidden_paths", "home_root", "home_allow", "ca_bundles", "scratch_dir",
-                          "scratch_view", "scratch_private"]
+                          "scratch_private", "profile_home", "sandbox_root"]
 
     def test_chdir_follows_tracked_cwd_with_fixed_mounts(self, sandbox_root, work_dir):
         home = os.path.expanduser("~")
@@ -1365,7 +1365,11 @@ class TestBindSourceGuard:
         cache = work_dir / "cache"
         cache.mkdir()
         self._constructs(work_dir, self._config(binds=[BindMount(src=str(cache), dest=str(cache), readonly=False)]))
-        self._constructs(work_dir, self._config(binds=[BindMount(src=str(cache), dest="/mnt/cache", readonly=True)]))
+        self._constructs(work_dir, self._config(binds=[BindMount(src=str(cache), dest=str(cache), readonly=True)]))
+        # Elsewhere the source is a plain entry of the writable cwd, which a command can swap.
+        with _no_session(), pytest.raises(ValueError, match="binds entry"):
+            BubblewrapEnvironment(cwd=str(work_dir), timeout=10,
+                                  config=self._config(binds=[BindMount(src=str(cache), dest="/mnt/cache", readonly=True)]))
 
     def test_rw_bind_of_the_cwd_itself_elsewhere_constructs(self, sandbox_root, work_dir):
         # The cwd is bound at its own path first, so it is a mount point inside.
