@@ -46,11 +46,46 @@ def _last_json(stdout: str) -> dict:
     return json.loads(stdout.strip().splitlines()[-1])
 
 
+def test_offline_first_run_reports_a_json_error_not_a_stack_trace(tmp_path):
+    # First run with no three.js cache and no network: the download fails. The script must still end in its
+    # one {"ok": false} line. Copied out of the plugin tree so a dev checkout's node_modules/three is not found.
+    if not (_node_version() >= (24,) or (22, 21) <= _node_version() < (23,)):
+        pytest.skip("this node ignores HTTPS_PROXY for fetch (NODE_USE_ENV_PROXY needs 22.21+/24+)")
+    script = tmp_path / "scripts" / SCRIPT.name
+    script.parent.mkdir()
+    shutil.copy(SCRIPT, script)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = _env(home, HTTPS_PROXY="http://127.0.0.1:9", https_proxy="http://127.0.0.1:9", NODE_USE_ENV_PROXY="1",
+               NO_PROXY="", no_proxy="")
+    # --chrome only has to name an existing file: the three.js download runs before the browser starts.
+    r = subprocess.run([NODE, str(script), str(_glb(tmp_path / "m.glb")), "--chrome", sys.executable],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120, env=env, check=False)
+    assert r.returncode != 0
+    result = _last_json(r.stdout)
+    assert result["ok"] is False and "could not download three" in result["error"]
+    assert "triggerUncaughtException" not in r.stderr
+
+
 def _cached_three(home: Path) -> None:
     """A cached three.js the script accepts without a download (only its package.json is read before the browser)."""
     three = home / "cache" / "meshy-preview" / "three-0.180.0" / "package"
     three.mkdir(parents=True)
     (three / "package.json").write_text('{"version": "0.180.0"}', encoding="utf-8")
+
+
+def test_any_unexpected_failure_still_ends_in_one_json_error_line(tmp_path):
+    # Not every failure is one the script names: here its scratch dir cannot be created (temp dir is gone).
+    home = tmp_path / "home"
+    _cached_three(home)
+    gone = str(tmp_path / "no-such-tmp")
+    r = subprocess.run([NODE, str(SCRIPT), str(_glb(tmp_path / "m.glb")), "--chrome", sys.executable],
+                       capture_output=True, text=True, encoding="utf-8", timeout=120, check=False,
+                       env=_env(home, TMPDIR=gone, TEMP=gone, TMP=gone))
+    assert r.returncode != 0
+    result = _last_json(r.stdout)
+    assert result["ok"] is False and "no-such-tmp" in result["error"]
+    assert "triggerUncaughtException" not in r.stderr
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="the fake browser is a POSIX sh script")

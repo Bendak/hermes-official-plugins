@@ -125,7 +125,10 @@ async function findThree() {
   }
   const cache = path.join(hermesHome(), 'cache', 'meshy-preview', `three-${THREE_VERSION}`)
   if (want(path.join(cache, 'package'))) return path.join(cache, 'package')
-  const res = await fetch(THREE_TARBALL)
+  let res
+  try { res = await fetch(THREE_TARBALL) } catch (e) {
+    die(`could not download three ${THREE_VERSION} from ${THREE_TARBALL} (first run needs network once): ${e.cause?.code || e.cause?.message || e.message}`)
+  }
   if (!res.ok) die(`could not download three ${THREE_VERSION}: HTTP ${res.status}`)
   const buf = Buffer.from(await res.arrayBuffer())
   if ('sha512-' + createHash('sha512').update(buf).digest('base64') !== THREE_SRI) die('three tarball integrity mismatch')
@@ -463,4 +466,8 @@ async function main() {
   } finally { cleanup() }
 }
 
-main()
+// Failures before the browser is up (three download, tar, temp dirs, CDP connect) and stray
+// event-loop throws still end in the one JSON line, never a Node stack trace.
+const crash = e => die(String(e?.message || e))
+process.on('uncaughtException', crash)
+main().catch(crash)
