@@ -132,6 +132,8 @@ def _flag(raw: Any, key: str) -> bool:
 
 # Live, models wrote "about 1 second" into the prompt instead of setting duration_seconds (4 of 14
 # turns), paying the automatic-length rate (50 credits) and usually regenerating at the right length.
+# It also matches timing inside a sound ("a beep every 2 seconds"); that costs one retry with a
+# duration set, which such a call should carry anyway, so the message keeps that text in the prompt.
 _LENGTH_IN_PROMPT = re.compile(r"\b\d+(?:\.\d+)?\s*-?\s*(?:secs?|seconds?)\b", re.IGNORECASE)
 
 
@@ -150,7 +152,9 @@ def build_request(args: dict, model: str) -> dict:
         raise ValueError(
             f"the prompt names a length ({named.group(0)!r}) but duration_seconds is not set: ElevenLabs "
             f"ignores lengths written in the prompt and bills an unset length at a higher flat rate. "
-            f"Pass duration_seconds ({MIN_SECONDS:g}-{MAX_SECONDS:g}) and leave the length out of the prompt.")
+            f"Pass duration_seconds ({MIN_SECONDS:g}-{MAX_SECONDS:g}) for the clip's total length; drop that "
+            f"length from the prompt, but keep timing that describes the sound itself (e.g. 'a beep every 2 "
+            f"seconds').")
     influence = _number(args, "prompt_influence", 0.0, 1.0)
     if influence is not None:
         body["prompt_influence"] = influence
