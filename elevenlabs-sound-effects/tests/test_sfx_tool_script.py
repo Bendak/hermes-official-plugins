@@ -1,0 +1,106 @@
+"""The skill's post-processing script: one JSON line on stdout for success AND every failure, exit
+0/1, never a traceback. Failure paths run everywhere; ffmpeg-backed paths run where ffmpeg exists."""
+
+from __future__ import annotations
+
+import json
+import math
+import shutil
+import struct
+import subprocess
+import sys
+import wave
+import zipfile
+from pathlib import Path
+
+import pytest
+
+SCRIPT = Path(__file__).resolve().parents[1] / "skills" / "elevenlabs-sound-design" / "scripts" / "sfx_tool.py"
+needs_ffmpeg = pytest.mark.skipif(not (shutil.which("ffmpeg") and shutil.which("ffprobe")),
+                                  reason="ffmpeg/ffprobe not installed on this runner")
+
+
+def run(*args: str) -> tuple[int, dict]:
+    proc = subprocess.run([sys.executable, str(SCRIPT), *args], capture_output=True, text=True,
+                          encoding="utf-8", timeout=120, check=False)
+    lines = proc.stdout.strip().splitlines()
+    assert len(lines) == 1, f"expected one JSON line, got stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "Traceback" not in proc.stderr and "Traceback" not in proc.stdout
+    payload = json.loads(lines[0])
+    assert payload["ok"] is (proc.returncode == 0)
+    return proc.returncode, payload
+
+
+def tone(path: Path, seconds: float, freq: float, *, rate: int = 48000, pad: float = 0.0) -> Path:
+    silence = b"\x00\x00" * int(pad * rate)
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(1)
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(silence + b"".join(
+            struct.pack("<h", int(16000 * math.sin(2 * math.pi * freq * i / rate))) for i in range(int(seconds * rate)))
+            + silence)
+    return path
+
+
+def test_ffmpeg_missing_is_a_clean_json_error(tmp_path):
+    src = tone(tmp_path / "a.wav", 0.2, 440)
+    for args in (("loopcheck", str(src)), ("probe", str(src)), ("process", str(src), "--out", str(tmp_path / "b.ogg"))):
+        code, out = run("--ffmpeg", "no-such-ffmpeg-binary", "--ffprobe", "no-such-ffprobe-binary", *args)
+        assert code == 1 and out["code"] == "ffmpeg_missing" and "ffmpeg" in out["error"]
+
+
+def test_bad_input_and_bad_arguments_are_clean_json_errors(tmp_path):
+    assert run("probe", str(tmp_path / "missing.wav"))[1]["code"] == "bad_input"
+    assert run("frobnicate")[1]["code"] == "bad_args"
+    assert run("process", str(tone(tmp_path / "a.wav", 0.2, 440)))[1]["code"] == "bad_args"  # --out missing
+
+
+@needs_ffmpeg
+def test_garbage_audio_is_reported_not_raised(tmp_path):
+    bad = tmp_path / "bad.mp3"
+    bad.write_bytes(b"this is not audio")
+    for args in (("probe", str(bad)), ("loopcheck", str(bad)), ("process", str(bad), "--out", str(tmp_path / "x.wav"))):
+        code, out = run(*args)
+        assert code == 1 and out["code"] in {"bad_input", "ffmpeg_failed"}
+
+
+@needs_ffmpeg
+def test_process_trims_normalises_fades_and_converts(tmp_path):
+    src = tone(tmp_path / "padded.wav", 0.5, 440, pad=0.4)
+    out_path = tmp_path / "clean.ogg"
+    code, out = run("process", str(src), "--out", str(out_path), "--loudness", "-16", "--fade-ms", "10")
+    assert code == 0 and out_path.is_file()
+    assert out["output"]["codec"] == "vorbis" and out["output"]["sample_rate"] == 48000
+    assert out["output"]["duration_seconds"] < out["input"]["duration_seconds"] - 0.5  # silence trimmed
+    # Never overwrites: the same output again refuses without --force; the input itself always refuses.
+    assert run("process", str(src), "--out", str(out_path))[1]["code"] == "bad_args"
+    assert run("process", str(src), "--out", str(src), "--force")[1]["code"] == "bad_args"
+
+
+@needs_ffmpeg
+def test_loopcheck_tells_a_clean_seam_from_a_click(tmp_path):
+    # 480 Hz at 48 kHz: exactly 100 samples per cycle, so 1.0 s is a whole number of cycles.
+    clean = run("loopcheck", str(tone(tmp_path / "clean.wav", 1.0, 480)))[1]
+    # Cut at a quarter cycle: the last sample sits at the peak while the first is at zero.
+    clicky = run("loopcheck", str(tone(tmp_path / "click.wav", 1.0 + 25 / 48000, 480)))[1]
+    assert clean["verdict"] == "seamless"
+    assert clicky["verdict"] == "click" and clicky["seam_jump"] > clean["seam_jump"]
+
+
+@needs_ffmpeg
+def test_pack_writes_folder_manifest_and_zip(tmp_path):
+    a = tone(tmp_path / "sfx_coin_20261023_120000_aaaaaaaaaaaa.wav", 0.3, 880)
+    b = tone(tmp_path / "sfx_door_20261023_120000_bbbbbbbbbbbb.wav", 0.4, 220)
+    prompts = tmp_path / "prompts.json"
+    prompts.write_text(json.dumps({a.name: "retro coin pickup"}), encoding="utf-8")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    code, out = run("pack", str(a), str(b), "--name", "UI Pack", "--out-dir", str(out_dir), "--format", "ogg",
+                    "--prompts", str(prompts))
+    assert code == 0 and out["count"] == 2
+    manifest = json.loads((out_dir / "ui-pack" / "manifest.json").read_text(encoding="utf-8"))
+    assert [s["file"] for s in manifest["sounds"]] == ["01-coin.ogg", "02-door.ogg"]
+    assert manifest["sounds"][0]["prompt"] == "retro coin pickup" and manifest["sounds"][0]["codec"] == "vorbis"
+    with zipfile.ZipFile(out_dir / "ui-pack.zip") as archive:
+        assert sorted(archive.namelist()) == ["ui-pack/01-coin.ogg", "ui-pack/02-door.ogg", "ui-pack/manifest.json"]

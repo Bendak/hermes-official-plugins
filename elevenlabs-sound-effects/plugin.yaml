@@ -1,14 +1,16 @@
 name: elevenlabs-sound-effects
 label: ElevenLabs Sound Effects
 kind: standalone
-version: 1.0.0
+version: 1.1.0
 author: NousResearch
 homepage: https://github.com/NousResearch/hermes-official-plugins/tree/main/elevenlabs-sound-effects
 description: >
   ElevenLabs sound effects for Hermes Agent: one tool, `elevenlabs_sound_effect`, that turns a text
   description ("glass shattering on a tile floor", "90s hip-hop drum loop, 90 BPM") into an audio
-  file through the ElevenLabs Sound Effects API, up to 30 seconds, optionally loopable. Uses your
-  ElevenLabs API key (the same `ELEVENLABS_API_KEY` Hermes's ElevenLabs voice uses).
+  file through the ElevenLabs Sound Effects API, up to 30 seconds, optionally loopable. Bundles a
+  sound-design skill with a local post-processing script, and in Hermes Desktop an inline sound card
+  (waveform, play, loop audition, download per format, follow-up actions) and a sound library tab.
+  Uses your ElevenLabs API key (the same `ELEVENLABS_API_KEY` Hermes's ElevenLabs voice uses).
 requires_hermes: ">=0.22.0"
 provides_tools:
   - elevenlabs_sound_effect

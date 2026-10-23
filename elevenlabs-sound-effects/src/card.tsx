@@ -1,0 +1,153 @@
+// The in-chat sound card: `::elevenlabs-sfx{id="<sound_id>"}`.
+
+import type { PluginContext } from '@hermes/plugin-sdk'
+import { Button, Codicon } from '@hermes/plugin-sdk'
+import { useEffect, useState } from 'react'
+
+import { backendIsRemote, errorText, onScopeChange, statusOf } from './audio.ts'
+import { billed, formatLabel, type HostInfo, modelLabel, secondsLabel, SOUND_ID, type SoundRecord } from './sound.ts'
+import { Chip, DownloadMenu, NextMenu, S, Transport, useSound, Waveform, Where } from './ui.tsx'
+
+const AUTO_LOAD_BYTES = 4 * 1024 * 1024
+
+type State =
+  | { kind: 'loading' }
+  | { kind: 'error'; message: string; retry: boolean }
+  | { kind: 'ready'; rec: SoundRecord; info: HostInfo }
+
+export function SoundCard({
+  ctx,
+  id,
+  sessionId,
+  streaming,
+  source,
+  onOpenLibrary
+}: {
+  ctx: PluginContext
+  id: string
+  sessionId: null | string | undefined
+  streaming: boolean
+  source: string
+  onOpenLibrary: () => void
+}) {
+  const valid = SOUND_ID.test(id)
+  const [state, setState] = useState<State>({ kind: 'loading' })
+  const [remote, setRemote] = useState<boolean | null>(null)
+  const [generation, setGeneration] = useState(0)
+
+  useEffect(() => onScopeChange(() => setGeneration(g => g + 1)), [])
+
+  // One request per mount / retry / profile-or-connection switch; never a timer.
+  useEffect(() => {
+    if (!valid || streaming) return
+    let live = true
+    setState({ kind: 'loading' })
+    void backendIsRemote().then(r => live && setRemote(r))
+    ctx
+      .rest<{ sound: SoundRecord } & HostInfo>(`sound?id=${id}`, { timeoutMs: 20_000 })
+      .then(({ sound, ...info }) => live && setState({ kind: 'ready', rec: sound, info }))
+      .catch(err => {
+        if (!live) return
+        const status = statusOf(err)
+        const message =
+          status === 404 && /no sound/.test(errorText(err))
+            ? 'This sound is not in the active profile’s library (it was made in another profile, or its record was removed).'
+            : errorText(err)
+        setState({ kind: 'error', message, retry: status === 0 || status >= 500 || status === 404 })
+      })
+    return () => {
+      live = false
+    }
+  }, [ctx, id, valid, streaming, generation])
+
+  if (!valid) {
+    return <p>{source}</p>
+  }
+  if (streaming || state.kind === 'loading') {
+    return (
+      <div data-sfx-card="loading" style={S.card}>
+        <span style={S.muted}>
+          <Codicon name="loading" spinning /> Loading sound…
+        </span>
+      </div>
+    )
+  }
+  if (state.kind === 'error') {
+    return (
+      <div data-sfx-card="error" style={S.card}>
+        <span style={S.error}>{state.message}</span>
+        {state.retry && (
+          <div style={S.row}>
+            <Button onClick={() => setGeneration(g => g + 1)} size="sm" variant="outline">
+              <Codicon name="refresh" /> Retry
+            </Button>
+          </div>
+        )}
+      </div>
+    )
+  }
+  return <ReadyCard ctx={ctx} info={state.info} onOpenLibrary={onOpenLibrary} rec={state.rec} remote={remote} sessionId={sessionId} />
+}
+
+function ReadyCard({
+  ctx,
+  rec,
+  info,
+  remote,
+  sessionId,
+  onOpenLibrary
+}: {
+  ctx: PluginContext
+  rec: SoundRecord
+  info: HostInfo
+  remote: boolean | null
+  sessionId: null | string | undefined
+  onOpenLibrary: () => void
+}) {
+  const sound = useSound(ctx, rec, `card:${rec.id}`)
+  useEffect(() => {
+    if (rec.exists && (rec.size ?? 0) <= AUTO_LOAD_BYTES) void sound.load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per record
+  }, [rec.id])
+  const cost = billed(rec)
+  const wave = sound.loaded.state === 'ready' ? sound.loaded.wave : null
+  return (
+    <div data-sfx-card="ready" data-sfx-id={rec.id} style={S.card}>
+      <div style={{ ...S.row, justifyContent: 'space-between', alignItems: 'flex-start' }}>
+        <span style={S.prompt}>
+          <Codicon name="unmute" /> {rec.prompt}
+        </span>
+        <Button aria-label="Open the sound library" onClick={onOpenLibrary} size="icon" title="Sound library" variant="ghost">
+          <Codicon name="library" />
+        </Button>
+      </div>
+      <div style={S.row}>
+        <Chip title="Length">{sound.duration != null ? secondsLabel(sound.duration) : secondsLabel(rec.duration_seconds)}</Chip>
+        {rec.loop && <Chip>loopable</Chip>}
+        <Chip title={rec.model ?? ''}>{modelLabel(rec.model)}</Chip>
+        <Chip>{formatLabel(rec.output_format)}</Chip>
+        {cost != null && <Chip title="ElevenLabs character-cost header for this generation">{cost} credits</Chip>}
+      </div>
+      {wave ? (
+        <Waveform data={wave} onSeek={f => void sound.seek(f)} progress={sound.progress} />
+      ) : (
+        <div style={{ ...S.muted, height: 44, display: 'flex', alignItems: 'center' }}>
+          {sound.loaded.state === 'error' ? (
+            <span style={S.error}>{sound.loaded.message}</span>
+          ) : rec.exists ? (
+            sound.loaded.state === 'loading' ? 'Loading audio…' : 'Press Play to load the audio'
+          ) : (
+            'The sound file is no longer on the Hermes host.'
+          )}
+        </div>
+      )}
+      <div style={S.row}>
+        <Transport sound={sound} />
+        <DownloadMenu ctx={ctx} info={info} rec={rec} />
+        <Where ctx={ctx} info={info} rec={rec} remote={remote} />
+        <span style={{ flex: 1 }} />
+        <NextMenu directiveSession={sessionId} measured={sound.duration} rec={rec} />
+      </div>
+    </div>
+  )
+}
