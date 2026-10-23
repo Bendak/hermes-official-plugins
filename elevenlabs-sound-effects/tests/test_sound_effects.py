@@ -301,3 +301,19 @@ def test_unanswered_calls_say_dont_retry_and_missing_keys_name_the_profile(loade
         assert "~/.hermes/profiles/b/.env" in call({"prompt": "thunder"})["error"]
     finally:
         reset_hermes_home_override(token)
+
+
+def test_a_length_written_into_the_prompt_must_be_passed_as_duration(loaded, stand_ins, monkeypatch):
+    """Live, models wrote the user's length into the prompt ("... about 1 second") and left
+    duration_seconds out: ElevenLabs ignores it, bills its flat automatic-length rate and returns a
+    longer clip the model then regenerates. That call is refused before it is billed."""
+    _, call = loaded
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "xi-test-key")
+    for prompt in ("soft UI click, about 1 second", "a 2-second whoosh", "rain for 10 seconds"):
+        error = call({"prompt": prompt})["error"]
+        assert "duration_seconds" in error, error
+    assert stand_ins[0].requests == []
+
+    assert call({"prompt": "soft UI click, about 1 second", "duration_seconds": 1})["success"] is True
+    assert call({"prompt": "90s hip-hop drum loop, 90 BPM", "loop": True})["success"] is True
+    assert [r["body"].get("duration_seconds") for r in stand_ins[0].requests] == [1.0, None]

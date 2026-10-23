@@ -64,7 +64,8 @@ SCHEMA = {
         "Generate a sound effect from a text description with ElevenLabs (up to 30 seconds): foley, "
         "impacts, ambience, UI sounds, creature noises, short musical stingers or drum loops. "
         "Describe the sound concretely (source, material, space, intensity), e.g. 'heavy wooden door "
-        "creaking open in a stone hall'; at most 450 characters. Returns the saved file path and a MEDIA: line; include that "
+        "creaking open in a stone hall'; at most 450 characters. When the user names a length, pass it "
+        "as duration_seconds, never in the prompt text. Returns the saved file path and a MEDIA: line; include that "
         "MEDIA: line in your reply to send the audio to the user. Each call is billed to the user's "
         "ElevenLabs account."
     ),
@@ -128,6 +129,11 @@ def _flag(raw: Any, key: str) -> bool:
     raise ValueError(f"{key} must be true or false (got {raw!r})")
 
 
+# Live, models wrote "about 1 second" into the prompt instead of setting duration_seconds (4 of 14
+# turns), paying the automatic-length rate (50 credits) and usually regenerating at the right length.
+_LENGTH_IN_PROMPT = re.compile(r"\b\d+(?:\.\d+)?\s*-?\s*(?:secs?|seconds?)\b", re.IGNORECASE)
+
+
 def build_request(args: dict, model: str) -> dict:
     """The JSON body for one call; raises ``ValueError`` with a model-readable message."""
     prompt = str(args.get("prompt") or "").strip()
@@ -139,6 +145,11 @@ def build_request(args: dict, model: str) -> dict:
     duration = _number(args, "duration_seconds", MIN_SECONDS, MAX_SECONDS)
     if duration is not None:
         body["duration_seconds"] = duration
+    elif named := _LENGTH_IN_PROMPT.search(prompt):
+        raise ValueError(
+            f"the prompt names a length ({named.group(0)!r}) but duration_seconds is not set: ElevenLabs "
+            f"ignores lengths written in the prompt and bills an unset length at a higher flat rate. "
+            f"Pass duration_seconds ({MIN_SECONDS:g}-{MAX_SECONDS:g}) and leave the length out of the prompt.")
     influence = _number(args, "prompt_influence", 0.0, 1.0)
     if influence is not None:
         body["prompt_influence"] = influence
