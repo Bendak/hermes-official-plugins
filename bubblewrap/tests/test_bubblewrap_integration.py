@@ -174,6 +174,9 @@ class TestToolIntegration:
         bundle.write_text("TRUST-ANCHORS\n")
         (hermes_home / "config.yaml").write_text("secret: yes\n")
         monkeypatch.setenv("SSL_CERT_FILE", str(bundle))
+        # The venv stands in for the Python environment Hermes runs from, the one part of
+        # a Hermes home a trust anchor may be bound back from.
+        monkeypatch.setattr(bubblewrap, "python_env_roots", lambda: (str(hermes_home / "venv"),))
         r = json.loads(isolated_tool.terminal_tool(
             'cat "$SSL_CERT_FILE"; ls -A "$(dirname "$SSL_CERT_FILE")/../.."', task_id="ca-bundle",
         ))

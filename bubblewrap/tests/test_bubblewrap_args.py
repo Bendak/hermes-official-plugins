@@ -17,8 +17,10 @@ from bubblewrap_plugin.sandbox import (
     SENSITIVE_HOME_PATHS,
     ancestor_pin_args,
     build_bwrap_args,
+    bind_guard,
+    ca_bundle_binds,
     empty_file_path,
-    hidden_ca_bundles,
+    hermes_homes,
     load_bubblewrap_config,
     masked_inside,
     resolve_bind_dests,
@@ -708,18 +710,23 @@ class TestHiddenCaBundles:
     def test_bundle_under_hermes_home_is_bound_back_read_only_after_the_overlays(self, paths, monkeypatch):
         """Hermes exports SSL_CERT_FILE=certifi's bundle from the venv under HERMES_HOME; hidden, every TLS
         client in the sandbox fails. The bundle comes back read-only at its own path, and only the bundle."""
+        import bubblewrap_plugin.sandbox as sandbox
+
         hermes_home = Path(paths["hermes_home"])
-        bundle = hermes_home / "hermes-agent" / "venv" / "certifi" / "cacert.pem"
+        venv = hermes_home / "hermes-agent" / "venv"
+        bundle = venv / "certifi" / "cacert.pem"
         bundle.parent.mkdir(parents=True)
         bundle.write_text("# trust anchors")
         outside = Path(paths["home"]).parent / "system-ca.pem"
         outside.write_text("# system anchors")
+        monkeypatch.setattr(sandbox, "python_env_roots", lambda: (str(venv),))
         hidden = sensitive_paths(paths["home"], paths["hermes_home"])
+        guard = bind_guard(hidden, hermes_homes(paths["home"], paths["hermes_home"]), [paths["initial_cwd"]], None, ())
         environ = {"SSL_CERT_FILE": str(bundle), "CURL_CA_BUNDLE": str(outside),
                    "REQUESTS_CA_BUNDLE": str(hermes_home / "missing.pem")}
-        assert hidden_ca_bundles(hidden, environ) == (str(bundle),)
+        assert ca_bundle_binds(guard, environ) == ((str(bundle), str(bundle)),)
 
-        argv = build(paths=paths, hidden_paths=hidden, ca_bundles=(str(bundle),))
+        argv = build(paths=paths, hidden_paths=hidden, ca_bundles=((str(bundle), str(bundle)),))
         assert (str(bundle), str(bundle)) in triples(argv, "--ro-bind-try")
         bundle_at = argv.index(str(bundle))
         assert bundle_at > max(i for i, a in enumerate(argv) if a == "--tmpfs")  # lands on top of the overlay

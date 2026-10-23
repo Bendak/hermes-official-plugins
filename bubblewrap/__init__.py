@@ -161,7 +161,7 @@ class BubblewrapProvider(TerminalEnvironmentProvider):
         root = sandbox.writable_root_for(_terminal_env("TERMINAL_CWD", ""))
         start, replaced = sandbox.start_cwd_for(cwd, root)
         return sandbox.BubblewrapEnvironment(cwd=start, timeout=timeout, config=self.load_config(),
-                                             replaced_cwd=replaced, root=root)
+                                             replaced_cwd=replaced, root=root, session_key=task_id)
 
     # -- the model's view --
     def prompt_note(self, _session_info: Any = None) -> str:
@@ -184,7 +184,7 @@ class BubblewrapProvider(TerminalEnvironmentProvider):
             if config.home_mode in sandbox.PROFILE_HOME_MODES:
                 extra.append("the profile home ($HOME)")
         if profile.writable_cwd:
-            writable = ", ".join(["the working directory", "the scratch directory", *extra])
+            writable = ", ".join(["the working directory", "this sandbox's own scratch directory ($TMPDIR)", *extra])
         elif extra:
             writable = ", ".join(extra) + " (the working directory is read-only under this profile)"
         else:
@@ -194,7 +194,8 @@ class BubblewrapProvider(TerminalEnvironmentProvider):
             f"Terminal sandbox: bubblewrap, profile `{profile.name}`. Every `terminal` and `execute_code` call runs "
             f"in its own bwrap sandbox on this host with the same paths: the filesystem is read-only except {writable}; "
             "dot entries of the home directory that are not on the allowlist do not exist, the Hermes home is hidden, "
-            "and credential paths below a visible entry appear empty; /tmp and /proc are private to "
+            "and credential paths below a visible entry appear empty; the shared Hermes scratch directory is read-only "
+            "here, so write temporary files under $TMPDIR; /tmp and /proc are private to "
             f"each command; it has {network}. A `Read-only file system` error, a missing or empty credential path or a "
             "refused connection is that boundary, not a broken host: report it instead of working around it. "
             "Background processes are not available on this backend: each command's sandbox ends with it. "

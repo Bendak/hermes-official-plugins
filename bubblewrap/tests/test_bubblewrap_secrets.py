@@ -509,10 +509,14 @@ class TestHermesHomeIntegration:
             assert MARKER not in out
             assert env.execute(f"ls -A {hermes_home}")["output"].split() == ["cache", "sandboxes"]
             assert env.execute(f"ls -A {hermes_home}/sandboxes")["output"].split() == [state_dir.name]
-            # The scratch dir (TMPDIR) rides along read-write; nothing else under cache does.
+            # The scratch dir rides along as an empty read-only view holding this
+            # environment's own scratch dir, writable; nothing else under cache does.
             assert env.execute(f"ls -A {hermes_home}/cache")["output"].split() == ["scratch"]
-            assert env.execute(f"touch {hermes_home}/cache/scratch/probe")["returncode"] == 0
-            assert (hermes_home / "cache" / "scratch" / "probe").exists()
+            own = Path(env._scratch_private)
+            assert env.execute(f"ls -A {hermes_home}/cache/scratch")["output"].split() == [own.name]
+            assert env.execute(f"touch {hermes_home}/cache/scratch/probe")["returncode"] != 0
+            assert env.execute(f"touch {own}/probe")["returncode"] == 0
+            assert (own / "probe").exists()
         finally:
             env.cleanup()
         assert (hermes_home / "config.yaml").read_text() == f"# {MARKER}\n"

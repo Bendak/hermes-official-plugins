@@ -152,7 +152,9 @@ class TestStateDir:
             env = BubblewrapEnvironment(cwd=str(work_dir), timeout=10)
             local = LocalEnvironment(cwd=str(work_dir), timeout=10)
         prefix = "unset " + " ".join(HOST_SOCKET_VARS) + "; "
-        assert f"eval '{prefix}echo hi'" in env._wrap_command("echo hi", str(work_dir))
+        wrapped = env._wrap_command("echo hi", str(work_dir))
+        assert f"eval '{prefix}" in wrapped
+        assert wrapped.index(prefix) < wrapped.index("echo hi'")
         assert "eval 'echo hi'" in local._wrap_command("echo hi", str(work_dir))
         assert "unset SSH_AUTH_SOCK" not in local._wrap_command("echo hi", str(work_dir))
 
@@ -344,10 +346,11 @@ class TestConstructionTimeMounts:
     def test_builder_signature_takes_only_construction_inputs_and_tracked_cwd(self):
         params = list(inspect.signature(build_bwrap_args).parameters)
         # hidden_paths, home_root and home_allow (the HOME layout inputs), ca_bundles and
-        # scratch_dir are what the environment resolved at construction; none of them
+        # the scratch dirs are what the environment resolved at construction; none of them
         # ever comes from inside a sandbox.
         assert params == ["config", "initial_cwd", "state_dir", "home", "hermes_home", "tracked_cwd", "bwrap_path",
-                          "hidden_paths", "home_root", "home_allow", "ca_bundles", "scratch_dir"]
+                          "hidden_paths", "home_root", "home_allow", "ca_bundles", "scratch_dir",
+                          "scratch_view", "scratch_private"]
 
     def test_chdir_follows_tracked_cwd_with_fixed_mounts(self, sandbox_root, work_dir):
         home = os.path.expanduser("~")
