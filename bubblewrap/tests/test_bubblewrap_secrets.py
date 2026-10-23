@@ -509,10 +509,14 @@ class TestHermesHomeIntegration:
             assert MARKER not in out
             assert env.execute(f"ls -A {hermes_home}")["output"].split() == ["cache", "sandboxes"]
             assert env.execute(f"ls -A {hermes_home}/sandboxes")["output"].split() == [state_dir.name]
-            # The scratch dir (TMPDIR) rides along read-write; nothing else under cache does.
+            # The scratch dir shows this environment's own scratch dir, writable;
+            # nothing else under cache does.
             assert env.execute(f"ls -A {hermes_home}/cache")["output"].split() == ["scratch"]
+            own = Path(env._scratch_private)
+            assert env.execute(f"ls -A {hermes_home}/cache/scratch")["output"].split() == []
             assert env.execute(f"touch {hermes_home}/cache/scratch/probe")["returncode"] == 0
-            assert (hermes_home / "cache" / "scratch" / "probe").exists()
+            assert (own / "probe").exists()
+            assert not (hermes_home / "cache" / "scratch" / "probe").exists()
         finally:
             env.cleanup()
         assert (hermes_home / "config.yaml").read_text() == f"# {MARKER}\n"
@@ -558,7 +562,7 @@ class TestHomeModeCarveOut:
         # the profile home and the state dir are bound inside the layout,
         # before HOME is sealed.
         i_layout = mounts.index(("--tmpfs", paths["home"]))
-        i_profile = mounts.index(("--bind", str(profile_home), str(profile_home)))
+        i_profile = mounts.index(("--bind-try", str(profile_home.resolve()), str(profile_home)))
         i_state = mounts.index(("--bind", paths["state_dir"], paths["state_dir"]))
         i_seal = mounts.index(("--remount-ro", paths["home"]))
         assert i_layout < i_profile < i_state < i_seal
