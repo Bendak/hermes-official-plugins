@@ -11,27 +11,42 @@ This package launches Blender Lab's MCP server. Installing it changes nothing in
 
 Make Blender ready yourself instead of asking the user to open it. Do this before the first scene call of a task, and again whenever a scene call cannot connect.
 
-**The Blender executable** (`<blender>` below): Linux `blender` (flatpak: `flatpak run org.blender.Blender`); macOS `/Applications/Blender.app/Contents/MacOS/Blender`; Windows the newest `blender.exe` of 5.1 or later under `$env:ProgramFiles\Blender Foundation\` (the folder recorded by the `Blender` uninstall entry when it is installed elsewhere). Short command-line runs of it (`--command ...`) exit on their own and are fine at any time.
+**Find Blender once and use that installation for every step below.** Look where the plugin's install check looks, and pick the newest version of 5.1 or later:
+
+- Linux: `blender` on `PATH`; flatpak `org.blender.Blender` (run it as `flatpak run org.blender.Blender`); snap `/snap/bin/blender`; Steam `~/.steam/steam/steamapps/common/Blender/blender`, `~/.local/share/Steam/steamapps/common/Blender/blender` or `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Blender/blender`.
+- macOS: `Blender.app` in `/Applications`, `~/Applications` or `~/Library/Application Support/Steam/steamapps/common/Blender/`. Its executable is `<Blender.app>/Contents/MacOS/Blender`.
+- Windows: the folder of the `Blender` entry in the uninstall registry, else `$env:ProgramFiles\Blender Foundation\Blender <version>\blender.exe`.
+
+`<blender>` below is that executable. Short runs of it with `--background` or `--command` exit on their own and are fine at any time; they are not a second Blender window.
 
 1. Are this package's Blender tools listed? If not, report the sentence Hermes gives for the server and check the prerequisites in `references/setup.md`.
 2. Call `get_objects_summary`. A scene summary means Blender is ready: carry on.
-3. A connection error, such as `Cannot connect to Blender at localhost:9876`, means no Blender bridge is listening. Check whether a Blender window is already running (`pgrep -x blender` on Linux, `pgrep -x Blender` on macOS, `tasklist /FI "IMAGENAME eq blender.exe"` on Windows; ignore `--background` processes).
-4. **Not running:** run `<blender> --command extension list`. Without `mcp [installed]`, set the add-on up first (*Installing the add-on*). With it, **open Blender yourself, without asking.** Start it detached so it survives your turn and the end of the session (in Hermes: `terminal` with `background=true, persist_on_release=true`), and always pass `--online-mode`: the add-on only starts its bridge with online access, and the flag grants it to this Blender session alone, leaving the user's saved preference as they set it.
-   - Linux: `<blender> --online-mode`.
-   - macOS: `open -a Blender --args --online-mode`.
-   - Windows: `Start-Process "<blender>" -ArgumentList '--online-mode'`.
-   - No graphical session (SSH, a server or container, Linux without `DISPLAY` or `WAYLAND_DISPLAY`): `<blender> --background --online-mode --command blender_mcp`. Screenshots and viewport renders need a graphical Blender; say so if the task needs them, and tell the user how to stop the headless Blender.
+3. A connection error, such as `Cannot connect to Blender at localhost:9876`, means no bridge answered. Check the add-on with `<blender> --background --command blender_mcp --help`: a `usage: blender_mcp` line means it is installed and enabled. `Unrecognized command: "blender_mcp"` means it is missing or disabled, and `<blender> --command extension list` tells which (`mcp [installed]` = disabled). Fix that first (*Installing or enabling the add-on*).
+4. See who holds port 9876 (`ss -ltnp 'sport = :9876'` on Linux, `lsof -nP -iTCP:9876 -sTCP:LISTEN` on macOS, `Get-NetTCPConnection -LocalPort 9876 -State Listen` plus `Get-Process -Id <OwningProcess>` on Windows). Another program means the bridge cannot start: name the program to the user and do not stop it. Blender's window does not print this error, so this check is the only way to see it.
+5. Check whether a Blender window is already running (`pgrep -x blender` on Linux, `pgrep -x Blender` on macOS, `tasklist /FI "IMAGENAME eq blender.exe"` on Windows; ignore `--background` processes).
+6. **Not running:** **open Blender yourself, without asking.** Start it detached so it survives your turn and the end of the session (in Hermes: `terminal` with `background=true, persist_on_release=true`), and always pass `--online-mode`: the add-on only starts its bridge with online access, and the flag grants it to this Blender session alone, leaving the user's saved preference as they set it.
+   - Linux and Windows: run `<blender> --online-mode` (Windows: `Start-Process "<blender>" -ArgumentList '--online-mode'`).
+   - macOS: `open -a "<Blender.app>" --args --online-mode`, with the same `Blender.app` you found.
+   - No graphical session (SSH, a server or container, Linux without `DISPLAY` or `WAYLAND_DISPLAY`): `<blender> --background --online-mode --command blender_mcp`. Screenshots and viewport renders need a graphical Blender; say so if the task needs them, and tell the user that Blender is running in the background and how to stop it.
 
    A closed Blender has no open scene: when the user named a saved `.blend` file, put its path after `--online-mode` (and before `--command` when headless) so Blender opens it; otherwise Blender opens its startup scene. Retry `get_objects_summary` every few seconds for up to 30 seconds, then tell the user in one line that you opened Blender with online access for this session, and which scene you are looking at.
 
-   Still refused after 30 seconds: read the Blender process's output instead of asking the user. "Online access must be enabled" means the flag did not reach Blender; "Address already in use" means another program holds port 9876 (name it, do not kill it). Otherwise the add-on is disabled or its **Auto Start** is off: ask the user to click **Start MCP Bridge Server** under Edit > Preferences > Add-ons > MCP.
-5. **Already running:** never start a second Blender window beside it. Run `<blender> --command extension list`; without `mcp [installed]`, offer the add-on install (it needs Blender closed, so ask the user to save and quit first). With it, the user most likely opened Blender without online access, or the add-on is disabled: ask them to quit Blender so you can reopen it with `--online-mode`, or to turn on **Allow Online Access** (Edit > Preferences > System > Network) and click **Start MCP Bridge Server** under Edit > Preferences > Add-ons > MCP.
+   Still refused after 30 seconds with the add-on enabled and the port free: in a headless Blender read its output, it prints the reason. In a Blender window the add-on's **Auto Start** is most likely off: ask the user to click **Start MCP Bridge Server** under Edit > Preferences > Add-ons > MCP, where the panel also shows the error if there is one.
+7. **Already running:** never start a second Blender window beside it. With the add-on enabled and the port free, the user most likely opened Blender without online access: ask them to quit Blender so you can reopen it with `--online-mode`, or to turn on **Allow Online Access** (Edit > Preferences > System > Network) and click **Start MCP Bridge Server** under Edit > Preferences > Add-ons > MCP.
 
 If Blender is missing or older than 5.1, say so and link https://www.blender.org/download/. Never install Blender itself.
 
-### Installing the add-on
+### Installing or enabling the add-on
 
-Offer it once per session, and say what it is: Blender Lab's official add-on that lets this plugin's tools run Python in Blender with the user's privileges, through a local server on port 9876 that has no password, so any program on this computer can use it while Blender is open. On yes, with no Blender window running:
+Both change Blender's saved add-on settings and need Blender closed, so a running Blender window must be saved and quit by the user first. Offer once per session, and say what the add-on is: Blender Lab's official add-on that lets this plugin's tools run Python in Blender with the user's privileges, through a local server on port 9876 that has no password, so any program on this computer can use it while Blender is open.
+
+**Disabled** (`mcp [installed]`): on yes, enable it without touching other preferences (no `--online-mode` here, so online access is never saved):
+
+```sh
+<blender> --background --python-expr "import bpy, addon_utils; m = [x.__name__ for x in addon_utils.modules() if x.__name__.startswith('bl_ext.') and x.__name__.endswith('.mcp')]; bpy.ops.preferences.addon_enable(module=m[0]); bpy.ops.wm.save_userpref()"
+```
+
+**Missing**: on yes, install the pinned release:
 
 ```sh
 curl -L -o <scratch dir>/mcp-1.0.3.zip https://projects.blender.org/lab/blender_mcp/releases/download/v1.0.3/mcp-1.0.3.zip
@@ -39,7 +54,9 @@ sha256sum <scratch dir>/mcp-1.0.3.zip   # must be a7a9da816192502e5a0a202a396444
 <blender> --command extension install-file -r user_default -e <scratch dir>/mcp-1.0.3.zip
 ```
 
-On macOS check the hash with `shasum -a 256`; on Windows download with `curl.exe` (PowerShell's `curl` is a different command) and check with `Get-FileHash`. Stop if the hash differs. v1.0.3 is the add-on that matches the server this plugin pins. Installing and enabling it are the only changes to Blender's saved preferences: `--online-mode` covers online access whenever you open Blender. Then open Blender as in step 4.
+On macOS check the hash with `shasum -a 256`; on Windows download with `curl.exe` (PowerShell's `curl` is a different command) and check with `Get-FileHash`. Stop if the hash differs. v1.0.3 is the add-on that matches the server this plugin pins. Installing or enabling it are the only changes to Blender's saved preferences: `--online-mode` covers online access whenever you open Blender.
+
+Afterwards, confirm with `<blender> --background --command blender_mcp --help` and open Blender as in step 6.
 
 If the user declines, or the command fails, guide them instead. Open https://www.blender.org/lab/mcp-server/ for them (in the Hermes desktop app with `desktop_preview`, elsewhere as a link):
 
