@@ -374,3 +374,30 @@ def test_a_rejected_key_is_a_permanent_4xx_and_a_plan_gated_route_is_not(api, me
     meshy.overrides = {f"/openapi/v1/image-to-3d/{_tid(9)}": (401, {}, b"{}")}
     err = _status(api.task_state, _tid(9))
     assert (err.status_code, err.detail) == (403, "Meshy rejected the API key")
+
+
+def test_a_refusal_on_every_route_is_meshys_403_never_no_such_task(api, meshy):
+    # Meshy's 403 (IP allowlist, org file filtering) on every route: its reason reaches the card as a 403,
+    # and it is never remembered as "no such task".
+    refused = (403, {}, b'{"message": "ip_not_authorized: 203.0.113.9"}')
+    task = _tid(11)
+    meshy.overrides = {f"{r}/{task}": refused for r in set(_ROUTES.values())}
+    err = _status(api.task_state, task)
+    assert err.status_code == 403 and "ip_not_authorized" in err.detail
+    with api._ROUTE_LOCK:
+        assert not api._MISS_CACHE
+    # An outage on one route outranks a refusal elsewhere: the card retries instead of stopping.
+    meshy.overrides[f"/openapi/v1/uv-unwrap/{task}"] = (503, {}, b"{}")
+    assert _status(api.task_state, task).status_code == 502
+    # The task's own route refusing after it was found is a 403 too, never a file-less generic record.
+    meshy.overrides = {}
+    found = meshy.add("convert", 12, model_urls={"glb": _asset(meshy, "m.glb")})
+    assert api.task_state(found)["has_model"]
+    meshy.overrides = {f"{_ROUTES['convert']}/{found}": refused}
+    assert _status(api.task_state, found).status_code == 403
+
+
+def test_a_task_with_only_a_blend_still_offers_its_download(api, meshy):
+    task = meshy.add("convert", 13, model_urls={"blend": _asset(meshy, "m.blend")})
+    got = api.task_state(task)
+    assert (got["has_model"], got["has_files"]) == (False, True)
