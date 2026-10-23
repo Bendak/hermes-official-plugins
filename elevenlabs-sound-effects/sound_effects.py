@@ -175,43 +175,50 @@ def _api_error(status: int, body: bytes, reason: str) -> str:
     return f"ElevenLabs returned HTTP {status}: {message}{hint}"
 
 
+def _fetch(client, base_url: str, output_format: str, body: dict, api_key: str):
+    """One streamed request under the byte cap; returns ``(status, body bytes, reason, headers)``."""
+    with client.stream(
+            "POST", f"{base_url}/v1/sound-generation", params={"output_format": output_format}, json=body,
+            headers={"xi-api-key": api_key, "accept": "audio/*"}) as response:
+        declared = response.headers.get("content-length", "")
+        if declared.isdigit() and int(declared) > MAX_AUDIO_BYTES:
+            raise ResponseRefused(f"response of {declared} bytes is over the {MAX_AUDIO_BYTES} byte cap")
+        chunks, size = [], 0
+        for chunk in response.iter_bytes():
+            size += len(chunk)
+            if size > MAX_AUDIO_BYTES:
+                raise ResponseRefused(f"response is over the {MAX_AUDIO_BYTES} byte cap")
+            chunks.append(chunk)
+        return response.status_code, b"".join(chunks), response.reason_phrase, response.headers
+
+
 def _download(base_url: str, output_format: str, body: dict, api_key: str):
-    """Stream the response under a byte cap and an overall deadline (headers included: a watchdog
-    closes the client); returns ``(status, body bytes, reason, headers)``. Raises
-    ``ResponseRefused`` for an oversize or overdue response, ``httpx.HTTPError`` otherwise."""
+    """``_fetch`` under an overall deadline that covers the wait for headers too. The request runs on
+    a daemon worker and the caller waits at most ``_DEADLINE_SECONDS``: closing a client does not
+    interrupt a blocked socket read on every OS, so the deadline cannot rely on it. A worker left
+    behind ends at its own read timeout. Raises ``ResponseRefused`` for an oversize or overdue
+    response, ``httpx.HTTPError`` otherwise."""
     import httpx
 
     client = httpx.Client(timeout=_CONNECT_READ_TIMEOUT)
-    expired = threading.Event()
+    outcome: dict = {}
 
-    def expire():
-        expired.set()
-        client.close()
+    def work():
+        try:
+            outcome["value"] = _fetch(client, base_url, output_format, body, api_key)
+        except Exception as exc:  # noqa: BLE001 -- re-raised in the caller below
+            outcome["error"] = exc
 
-    watchdog = threading.Timer(_DEADLINE_SECONDS, expire)
-    watchdog.daemon = True
-    watchdog.start()
-    try:
-        with client.stream(
-                "POST", f"{base_url}/v1/sound-generation", params={"output_format": output_format}, json=body,
-                headers={"xi-api-key": api_key, "accept": "audio/*"}) as response:
-            declared = response.headers.get("content-length", "")
-            if declared.isdigit() and int(declared) > MAX_AUDIO_BYTES:
-                raise ResponseRefused(f"response of {declared} bytes is over the {MAX_AUDIO_BYTES} byte cap")
-            chunks, size = [], 0
-            for chunk in response.iter_bytes():
-                size += len(chunk)
-                if size > MAX_AUDIO_BYTES:
-                    raise ResponseRefused(f"response is over the {MAX_AUDIO_BYTES} byte cap")
-                chunks.append(chunk)
-            return response.status_code, b"".join(chunks), response.reason_phrase, response.headers
-    except Exception as exc:
-        if expired.is_set() and not isinstance(exc, ResponseRefused):
-            raise ResponseRefused(f"no complete response within {_DEADLINE_SECONDS:g} seconds") from None
-        raise
-    finally:
-        watchdog.cancel()
+    worker = threading.Thread(target=work, name="elevenlabs-sfx-download", daemon=True)
+    worker.start()
+    worker.join(_DEADLINE_SECONDS)
+    if worker.is_alive():
         client.close()
+        raise ResponseRefused(f"no complete response within {_DEADLINE_SECONDS:g} seconds")
+    client.close()
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome["value"]
 
 
 def _slug(text: str) -> str:
