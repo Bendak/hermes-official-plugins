@@ -158,13 +158,15 @@ export const player = new Player()
  */
 export async function backendIsRemote(): Promise<boolean | null> {
   try {
+    // No id means "not a registered connection": a per-profile remote override or a legacy remote, but
+    // also the local backend on builds before `'local'` was reported. Never read that as local.
     const active =
       typeof host.activeConnectionId === 'function' ? host.activeConnectionId() : (host.state?.connectionId?.get() ?? null)
-    if (typeof host.connections !== 'function') return null
-    const rows = await host.connections()
-    const row = active ? rows.find(r => r.id === active) : rows.find(r => r.primary)
-    if (!row) return active ? null : false
-    return row.kind !== undefined ? row.kind !== 'local' : null
+    if (!active) return null
+    if (typeof host.connections !== 'function') return active === 'local' ? false : null
+    const row = (await host.connections()).find(r => r.id === active)
+    if (row?.kind !== undefined) return row.kind !== 'local'
+    return active === 'local' ? false : null
   } catch {
     return null
   }

@@ -86,7 +86,7 @@ export function SoundLibrary({ ctx, refreshSignal }: { ctx: PluginContext; refre
       ? `on ${data?.host ?? 'the remote Hermes host'} (remote). Playback and downloads stream through Hermes.`
       : remote === false
         ? 'on this computer.'
-        : `on ${data?.host ?? 'the Hermes host'}.`
+        : `on ${data?.host ?? 'the Hermes host'}, the machine running this profile’s Hermes.`
 
   return (
     <div data-sfx-library="" style={L.pane as React.CSSProperties}>
