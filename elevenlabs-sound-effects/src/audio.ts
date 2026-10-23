@@ -217,15 +217,17 @@ export function errorText(err: unknown): string {
   const raw = err instanceof Error ? err.message : String(err)
   const m = /^(\d{3}):\s*(.*)$/s.exec(raw)
   if (m) {
+    let detail: unknown
     try {
-      const detail = (JSON.parse(m[2]) as { detail?: unknown }).detail
-      if (typeof detail === 'string') return detail
+      detail = (JSON.parse(m[2]) as { detail?: unknown }).detail
     } catch {
       // not JSON
     }
-    if (m[1] === '404' && /Not Found/i.test(m[2])) {
-      return 'The plugin backend is not mounted yet: restart Hermes Desktop after enabling the plugin.'
+    // The host's own 404s (the route is not mounted for this profile), not one of this plugin's details.
+    if (m[1] === '404' && (detail === undefined || detail === 'Not Found' || detail === 'Plugin not found')) {
+      return 'ElevenLabs Sound Effects is not enabled in this profile’s Hermes (or its backend has not loaded it yet). Install or enable it for this profile; a running backend may need a restart.'
     }
+    if (typeof detail === 'string') return detail
     return `${m[1]}: ${m[2].slice(0, 200)}`
   }
   return raw.slice(0, 300)
