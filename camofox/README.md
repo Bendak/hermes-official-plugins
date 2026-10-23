@@ -195,7 +195,10 @@ plugin seam yet. Each is imported at its point of use:
 
 Vault fill (`browser_vault` filling a login form) does not reach the Camofox tab: core's vault tool
 would need a seam to evaluate its fill script through the active browser backend. Until then, type
-credentials with `browser_type`; snapshots redact filled values either way.
+credentials with `browser_type`. Snapshots mask values that look like secrets (API keys, tokens), but
+Camoufox prints every filled field's value, a password field's included, and its snapshot does not
+mark which field is a password: a plain password typed into the page (by the agent, or by you over
+VNC) shows up in `browser_snapshot` and the navigate result.
 
 ## License
 
