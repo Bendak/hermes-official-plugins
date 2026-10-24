@@ -484,9 +484,13 @@ def test_a_refused_key_stops_the_chip_even_when_the_tasks_route_is_cached(api, m
     meshy.overrides = {f"{_ROUTES['convert']}/{task}": (403, {}, b'{"message": "plan lacks convert"}')}
     got = api.active(tasks=f"convert:{task},text-to-3d:{other}")
     assert (got["failed"], [t["task_id"] for t in got["tasks"]]) == ([task], [other])
+    # The same for a task whose own route is a generic one: one route refusing it is not the key.
+    assert api.task_state(other)["status"] == "IN_PROGRESS"
+    meshy.overrides = {f"{_ROUTES['text-to-3d-preview']}/{other}": (403, {}, b'{"message": "file filtered"}')}
+    assert api.active(tasks=f"any:{other}")["failed"] == [other]
     refused = (403, {}, b'{"message": "ip_not_authorized"}')
     meshy.overrides = {f"{r}/{t}": refused for r in set(_ROUTES.values()) for t in (task, other)}
-    for tasks in (f"convert:{task},text-to-3d:{other}", f"any:{task}"):
+    for tasks in (f"convert:{task},text-to-3d:{other}", f"any:{task}", f"any:{other}"):
         err = _status(api.active, tasks=tasks)
         assert err.status_code == 403 and "ip_not_authorized" in err.detail, tasks
 

@@ -691,9 +691,7 @@ def _owned(row: dict, route: str, task_id: str, key: str) -> tuple[dict, str]:
 def _whose_refusal(exc: HTTPException, route: str, task_id: str, key: str) -> HTTPException:
     """A 403 on a task's known route: the key's or account's (_KeyRefused) when a generic route, which every plan
     reads, refuses too; otherwise only this task's (its own route is plan-gated) and ``exc`` stands."""
-    generic = _TASK_ROUTES[_PROBE_FIRST[0]]
-    if route in (_TASK_ROUTES[t] for t in _PROBE_FIRST):
-        return _KeyRefused(status_code=403, detail=exc.detail)
+    generic = next(r for r in (_TASK_ROUTES[t] for t in _PROBE_FIRST) if r != route)
     try:
         _task_at(generic, task_id, key)
     except HTTPException as again:
