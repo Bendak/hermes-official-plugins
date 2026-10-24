@@ -100,10 +100,14 @@ user's goal before the first paid call.
 3. **Submit once.** Every create returns `{task_id, status}` (Creative Lab waits and returns
    the model). Keep the `task_id` and task type.
 4. **Wait.** **On a messaging platform (Telegram, Discord, Slack, WhatsApp, Signal, Matrix ...),
-   never wait inline:** `meshy_get_task_status` defaults to `wait: true`, which holds the chat for
-   the whole job. Right after the create, in the same turn: reply "Started <what> (task <id>), about
-   N min", arm the background wake and end the turn; the wake checks once with `wait: false`
-   ([messaging](references/messaging.md) § Long jobs). Elsewhere, wait with
+   never wait inline:** `meshy_get_task_status` defaults to `wait: true`, and a foreground
+   `sleep` is the same thing: both hold the chat for the whole job. Right after the create, in the
+   same turn, make exactly these two moves and end the turn: reply "Started <what> (task <id>),
+   about N min", and arm the wake
+   `terminal(command="sleep 180 && echo meshy task <task_id>", background=true, notify_on_complete=true)`.
+   The wake turn checks once with `wait: false` and delivers. Only when no wake can come (no
+   terminal tool, or `notify_unsupported`) wait inline ([messaging](references/messaging.md)
+   § Long jobs). Elsewhere, wait with
    `meshy_get_task_status` (`wait: true`, default 300 s per call). Generation
    usually takes 2–3 minutes. A wait that times out leaves the task running: poll the same
    `task_id` again. **On Hermes Desktop,
