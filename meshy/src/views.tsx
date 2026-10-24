@@ -46,7 +46,7 @@ export interface FilePayload {
   dataUrl: string
 }
 
-import type { Balance } from './status.ts'
+import { type Balance, balanceLabel } from './status.ts'
 export { type Balance, DEFAULT_SETTINGS, type MeshySettings } from './status.ts'
 
 // Inline styles with theme variables: no injected <style> tag (nothing global to leak or clean up),
@@ -1213,15 +1213,7 @@ export function BalanceChip({ balance, onOpen }: { balance: Balance | null; onOp
   if (!balance) {
     return null
   }
-  const label = !balance.configured
-    ? 'no key'
-    : balance.error
-      ? /rejected/i.test(balance.error)
-        ? 'key rejected'
-        : /refused/i.test(balance.error)
-          ? 'refused'
-          : 'offline'
-      : `${(balance.balance ?? 0).toLocaleString()} cr`
+  const label = balanceLabel(balance)
   return (
     <button
       data-meshy-chip

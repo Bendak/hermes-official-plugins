@@ -419,7 +419,7 @@ def test_progress_chip_reads_only_the_tasks_it_names(api, meshy):
     running = meshy.add("text-to-3d-preview", 30, status="IN_PROGRESS", progress=40, prompt="duck")
     done = meshy.add("rig", 31)
     rigged = meshy.add("rig", 32, status="PENDING", progress=0)
-    assert api.active() == {"configured": True, "tasks": [], "done": [], "missing": []}
+    assert api.active() == {"configured": True, "tasks": [], "done": [], "missing": [], "failed": []}
     assert meshy.meshy_hits() == []
 
     got = api.active(tasks=f"text-to-3d:{running},rigging:{done},any:{rigged},remesh:{_tid(33)}")
@@ -446,14 +446,70 @@ def test_progress_chip_stops_on_a_refused_key_and_retries_an_outage(api, meshy):
     meshy.overrides = {f"/openapi/v2/text-to-3d/{task}": (401, {}, b"{}")}
     assert _status(api.active, tasks=f"text-to-3d:{task}").status_code == 403  # permanent: the chip stops
     meshy.overrides = {f"/openapi/v2/text-to-3d/{task}": (503, {}, b"{}")}
-    assert _status(api.active, tasks=f"text-to-3d:{task}").status_code == 502  # transient: it backs off
+    assert api.active(tasks=f"text-to-3d:{task}")["failed"] == [task]  # transient: the chip retries that task
+
+
+def test_one_tasks_failed_read_never_fails_the_others(api, meshy):
+    """Only a refusal of the key fails the batch. A plan-gated 403 or a 5xx on one task's route, or a status call's
+    real-but-wrong task_type, leaves the other rows alone and never turns a running task into done or missing."""
+    good = meshy.add("text-to-3d-preview", 50, status="IN_PROGRESS", progress=40)
+    gated = meshy.add("print-split", 51, status="IN_PROGRESS", progress=10)
+    down = meshy.add("remesh", 52, status="IN_PROGRESS", progress=20)
+    named_wrong = meshy.add("text-to-3d-preview", 53, status="IN_PROGRESS", progress=60)
+    plan_gated = (403, {}, b'{"message": "Your plan does not include this endpoint"}')
+    meshy.overrides = {f"/openapi/v1/print/split/{i}": plan_gated for i in (gated, named_wrong)}
+    meshy.overrides[f"/openapi/v1/remesh/{down}"] = (500, {}, b"{}")
+    got = api.active(tasks=f"text-to-3d:{good},print-split:{gated},remesh:{down},print-split:{named_wrong}")
+    assert [(t["task_id"], t["task_type"], t["progress"]) for t in got["tasks"]] == [
+        (named_wrong, "text-to-3d", 60), (good, "text-to-3d", 40)]
+    assert sorted(got["failed"]) == sorted([gated, down])
+    assert (got["done"], got["missing"]) == ([], [])
+    # A wrong route that just does not know the task: found by lookup, never "missing" while it runs.
+    meshy.overrides = {}
+    got = api.active(tasks=f"rigging:{named_wrong}")
+    assert [(t["task_id"], t["task_type"]) for t in got["tasks"]] == [(named_wrong, "text-to-3d")]
+    # A refusal on the generic routes every plan reads is about the key or account: the whole poll stops.
+    refused = (403, {}, b'{"message": "ip_not_authorized"}')
+    meshy.overrides = {f"{r}/{t}": refused for r in set(_ROUTES.values()) for t in (good, down)}
+    err = _status(api.active, tasks=f"text-to-3d:{good},any:{down}")
+    assert err.status_code == 403 and "ip_not_authorized" in err.detail
+
+
+def test_progress_chip_reads_share_a_cap_across_windows(api, meshy, monkeypatch):
+    """Each window's chip polls on its own; together their Meshy reads stay within _FANOUT in flight."""
+    ids = [meshy.add("text-to-3d-preview", 60 + i, status="IN_PROGRESS") for i in range(api._ACTIVE_MAX)]
+    real, lock, live = api._meshy_get, threading.Lock(), [0, 0]
+
+    def counted(*args, **kwargs):
+        with lock:
+            live[0] += 1
+            live[1] = max(live[1], live[0])
+        try:
+            threading.Event().wait(0.05)
+            return real(*args, **kwargs)
+        finally:
+            with lock:
+                live[0] -= 1
+
+    monkeypatch.setattr(api, "_meshy_get", counted)
+    batch = ",".join(f"text-to-3d:{i}" for i in ids)
+    windows = [threading.Thread(target=api.active, kwargs={"tasks": batch}, daemon=True) for _ in range(3)]
+    for w in windows:
+        w.start()
+    for w in windows:
+        w.join(30)
+    assert not any(w.is_alive() for w in windows)
+    assert 1 < live[1] <= api._FANOUT
 
 
 def test_status_names_a_403_refusal_instead_of_blaming_the_key(api, meshy):
-    meshy.overrides = {"/openapi/v1/balance": (403, {}, b'{"message": "ip_not_authorized: 203.0.113.9"}')}
-    assert api.status()["error"] == "Meshy refused the request: ip_not_authorized: 203.0.113.9"
+    meshy.overrides = {"/openapi/v1/balance": (403, {}, b'{"message": "Request rejected: IP not allowed"}')}
+    got = api.status()
+    assert (got["error"], got["error_code"]) == ("Meshy refused the request: Request rejected: IP not allowed", "refused")
     meshy.overrides = {"/openapi/v1/balance": (401, {}, b"{}")}
-    assert api.status()["error"] == "Meshy rejected the API key"
+    assert (api.status()["error"], api.status()["error_code"]) == ("Meshy rejected the API key", "key_rejected")
+    meshy.overrides = {"/openapi/v1/balance": (503, {}, b"{}")}
+    assert api.status()["error_code"] == "offline"
 
 
 def test_progress_chip_finds_a_task_named_with_a_wrong_kind(api, meshy):
@@ -463,14 +519,29 @@ def test_progress_chip_finds_a_task_named_with_a_wrong_kind(api, meshy):
     assert [(t["task_id"], t["task_type"]) for t in got["tasks"]] == [(task, "text-to-motion")]
 
 
-def test_progress_chip_lookups_never_starve_the_shared_probe_slots(api, meshy):
+def test_progress_chip_lookups_never_starve_the_shared_probe_slots(api, meshy, monkeypatch):
     """Four lookups of ids no generic route knows run _task's own fan-out; they must finish, and a card's
-    lookup alongside them too (holding a shared slot while waiting for one deadlocked every probe)."""
-    from concurrent.futures import ThreadPoolExecutor
+    lookup alongside them too (holding a shared slot while waiting for one deadlocked every probe).
+
+    Fails instead of hanging if that deadlock returns: the slots are plain semaphores this test can flood open
+    once it has waited long enough, so every stuck worker finishes and the pool can shut down."""
+    from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
+    slots = [threading.Semaphore(api._FANOUT), threading.Semaphore(api._FANOUT)]
+    monkeypatch.setattr(api, "_FANOUT_SLOTS", slots[0])
+    monkeypatch.setattr(api, "_ACTIVE_SLOTS", slots[1])
     ids = [meshy.add("text-to-motion", 40 + i, status="IN_PROGRESS") for i in range(api._ACTIVE_MAX)]
     card = meshy.add("creative-lab-figure-build", 49, model_urls={"glb": _asset(meshy, "f.glb")})
-    with ThreadPoolExecutor(max_workers=2) as pool:
+    pool = ThreadPoolExecutor(max_workers=2)
+    try:
         chip = pool.submit(api.active, tasks=",".join(f"any:{i}" for i in ids))
         state = pool.submit(api.task_state, card)
-        assert len(chip.result(timeout=60)["tasks"]) == api._ACTIVE_MAX
-        assert state.result(timeout=60)["has_model"]
+        try:
+            assert len(chip.result(timeout=60)["tasks"]) == api._ACTIVE_MAX
+            assert state.result(timeout=60)["has_model"]
+        except FutureTimeout:
+            pytest.fail("progress chip lookups deadlocked on the shared probe slots")
+    finally:
+        for sem in slots:
+            for _ in range(256):
+                sem.release()
+        pool.shutdown(wait=True, cancel_futures=True)

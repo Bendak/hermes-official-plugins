@@ -65,7 +65,10 @@ profile (these skip the trust prompt on builds after v0.22.5), or "Always" once 
 per-chat spend limit is lifted only by a `mcp_servers.meshy` override in `config.yaml` that
 repeats the pinned command, the key passthrough and `timeout: 1500` and sets `spend_limit: 0`
 (off) or a higher number. That override also drops the trust prompt unless it keeps
-`trust: untrusted`, so say so when the user only wants a higher limit.
+`trust: untrusted`, so say so when the user only wants a higher limit. Also tell them these settings
+cover unattended runs (cron, `chat -q`, a gateway with no approver): with `approvals.mode: off`,
+`--yolo` or an "Always" answer those runs make paid calls without asking up to the spend limit, and
+with `spend_limit: 0` plus any of those (or no `trust` line) they spend with no cap at all.
 
 ## Quick Reference
 

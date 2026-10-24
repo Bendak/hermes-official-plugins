@@ -22,7 +22,22 @@ export interface Balance {
   balance?: number
   key_env?: string
   error?: string
+  /** Why there is no balance; `error` quotes Meshy's own 403 text, so never pattern-match that. */
+  error_code?: 'key_rejected' | 'offline' | 'refused'
   settings?: Partial<MeshySettings>
+}
+
+/** The chip's word for a balance: credits, or why there are none. */
+export function balanceLabel(balance: Balance): string {
+  if (!balance.configured) {
+    return 'no key'
+  }
+  if (!balance.error) {
+    return `${(balance.balance ?? 0).toLocaleString()} cr`
+  }
+  // A backend without error_code: only its exact 401 wording means the key.
+  const code = balance.error_code ?? (balance.error === 'Meshy rejected the API key' ? 'key_rejected' : balance.error.startsWith('Meshy refused') ? 'refused' : 'offline')
+  return { key_rejected: 'key rejected', refused: 'refused', offline: 'offline' }[code] ?? 'offline'
 }
 
 import { type ScopeState, watchScope } from './scope.ts'

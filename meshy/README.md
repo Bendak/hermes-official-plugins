@@ -50,7 +50,8 @@ prices). The plugin marks the server `trust: untrusted`, so Hermes asks before e
 write-capable call (creates, downloads, cancels). Read-only tools (balance, usage, task status and
 lists, the animation library, slicer detection) run without a prompt. The skill also tells the agent
 to state the cost and get your yes before any paid call. Unattended runs (cron, `hermes chat -q`, a
-gateway with no approver) cannot approve, so paid calls are refused there.
+gateway with no approver) cannot approve, so with the default settings paid calls are refused there.
+The settings under [Full creative control](#full-creative-control-no-prompts) change that.
 
 What the prompt's answers cover depends on your Hermes build:
 
@@ -95,9 +96,15 @@ costs ignore the declaration.
 
    `${PLUGIN_DATA}` is not expanded in `config.yaml`, so the override cannot keep the plugin's own
    working folder. Without `cwd`, a download the agent makes without `save_to` lands in
-   `meshy_output/` in the chat's working directory (the session's terminal folder, else the folder
-   Hermes was started in). The skill always passes an absolute `save_to`, and you can name a
-   folder in your request. To pin one folder, set `cwd: ${userHome}/Meshy` (create it first).
+   `meshy_output/` in the folder the server was started in: the session's terminal folder at the
+   moment Hermes started the server, else the folder Hermes was started in. It is not re-read per
+   chat. The skill always passes an absolute `save_to`, and you can name a folder in your request. To pin one folder, set `cwd: ${userHome}/Meshy` (create it first).
+
+These settings apply to unattended runs too (cron jobs, `hermes chat -q`, a gateway with no
+approver), not only to chats you watch. With `approvals.mode: off`, a process started with `--yolo`,
+or an **Always** answer, such a run makes paid calls without asking until the chat reaches its spend
+limit (200 credits by default). With `spend_limit: 0` there is no limit left: anything that skips the
+trust prompt (no `trust` line, YOLO, or Always) then lets an unattended run spend without any cap.
 
 Prompts come back after `/yolo` is turned off, or after you delete the override and the
 `command_allowlist` lines.
