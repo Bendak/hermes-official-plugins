@@ -12,11 +12,6 @@ Routes:
     GET /sound?id=               one sound's record (for the in-chat card)
     GET /audio?id=&format=       the sound's bytes: ``original`` or, when ffmpeg is on this host,
                                  ``mp3`` / ``wav`` / ``ogg`` converted on the fly (nothing is billed)
-    POST /card-ready {prompt, owner, session}  the Desktop half saw a sound tool call start in chat
-                                 ``session`` (its ``tool.start`` event): that call, in that chat, then
-                                 answers with the card line instead of only ``MEDIA:``, because a Desktop
-                                 that will draw the card is watching
-    DELETE /card-ready?owner=    that Desktop half was switched off: forget its sightings
 """
 
 from __future__ import annotations
@@ -30,7 +25,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, Body, HTTPException, Query
+from fastapi import APIRouter, HTTPException, Query
 
 router = APIRouter()
 
@@ -172,27 +167,3 @@ def audio(id: str = Query(""), format: str = Query("original")) -> dict:  # noqa
     return {"id": row["id"], "format": ext, "mime": mime, "bytes": len(data),
             "file_name": f"{path.stem}.{ext}",
             "data_url": f"data:{mime};base64,{base64.b64encode(data).decode('ascii')}"}
-
-
-# Far over the tool's own 450-character limit: the tool refuses longer prompts, so their key never matters.
-_MAX_PROMPT_CHARS = 4096
-
-
-@router.post("/card-ready")
-def card_ready(prompt: str = Body(..., max_length=_MAX_PROMPT_CHARS),
-               owner: str = Body("", max_length=64), session: str = Body("", max_length=256)) -> dict:
-    try:
-        _prov.mark_card_ready(prompt, owner, session)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"could not record the card handshake: {exc.strerror or exc}") from None
-    return {"ok": True}
-
-
-@router.delete("/card-ready")
-def card_gone(owner: str = Query("", max_length=64)) -> dict:
-    """Desktop half ``owner`` is going away (switched off or unloaded): no card for its calls still running."""
-    try:
-        _prov.clear_card_marks(owner)
-    except OSError as exc:
-        raise HTTPException(status_code=500, detail=f"could not clear the card handshake: {exc.strerror or exc}") from None
-    return {"ok": True}

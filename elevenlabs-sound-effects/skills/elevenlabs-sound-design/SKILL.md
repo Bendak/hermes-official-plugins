@@ -1,7 +1,7 @@
 ---
 name: elevenlabs-sound-design
 description: Write ElevenLabs sound effect prompts, loops and packs.
-version: 1.1.0
+version: 1.2.0
 author: Teknium (teknium1), Hermes Agent
 license: MIT
 platforms: [linux, macos, windows]
@@ -154,21 +154,18 @@ the file names).
    `prompt_influence` for more variety). Completion: each call returned `success` and a `sound_id`.
 4. Post-process only when the destination needs it (format, loudness, trimming, a loop check).
    Completion: the script printed `"ok": true` for every file, or you report its error line.
-5. Deliver by surface:
-   - Hermes Desktop: one line of text, then ONE line for the sound on its own paragraph. If the result
-     has `desktop_card` (`::elevenlabs-sfx{id="<sound_id>"}`), use it: the card plays, loops and
-     downloads the sound, so no MEDIA: line for it. If it has none (the plugin's Desktop half is off,
-     or no Desktop with it watched the call), use the `media_tag` line: Desktop plays it with its own
-     player. Never both for one sound, and never write a card line the result did not give you.
-     Files you made from it (a `loopfix` result, a conversion, a pack zip) are not in the card: give
-     each on its own `MEDIA:<abs path>` line, and say which one to use.
-   - Messaging (Telegram, Discord, Slack, WhatsApp, Signal…): put `MEDIA:<file_path>` on its own line
-     for every file to send (the tool's `media_tag`). The file path appears ONLY on that line, never
-     in prose, or the file is sent twice. Markdown links and images are not delivered.
-   - CLI/terminal: give the file path.
-   Completion: every sound produced is delivered once on the user's surface.
+5. Deliver: put each sound's `media_tag` (`MEDIA:<file_path>`) on its own line in your reply, with one
+   line of text before it. That one line works on every surface: Hermes Desktop shows it as the
+   plugin's sound card (waveform, play, loop audition, downloads, Next actions) or, without the
+   plugin's Desktop half, in its own player; Telegram, Discord, Slack, WhatsApp, Signal and the
+   other messaging apps send it as a file; the CLI shows the path. Rules:
+   - The file path appears ONLY on its `MEDIA:` line, never in prose, or messaging apps send it twice.
+     Markdown links and images are not delivered.
+   - Files you made from a sound (a `loopfix` result, a conversion, a pack zip) each get their own
+     `MEDIA:<abs path>` line too; say which one to use.
+   Completion: every sound produced is on exactly one `MEDIA:` line.
 6. A sound pack: generate each sound (steps 3-4), then run `pack`; deliver the zip on its own
-   `MEDIA:` line (messaging and Desktop) or as a path (CLI), plus the manifest summary. Completion: the zip exists and
+   `MEDIA:` line, plus the manifest summary. Completion: the zip exists and
    `manifest.json` lists every sound.
 7. End with what was made: per sound the real length (`length_seconds`; say so when `length_note`
    reports a difference from the request), format and the credits billed, plus the loop
@@ -187,15 +184,14 @@ the file names).
 - Post-processing runs where the `terminal` tool runs. With a non-local terminal backend (Docker, SSH,
   Modal) the generated files and this script are not there and every call reports `bad_input`; then
   deliver the original sound and say processing needs the local terminal.
-- The card line is Desktop-only and needs the plugin's Desktop half; the tool includes `desktop_card`
-  only when such a Desktop saw this call start in this chat. Anywhere else, or without it, the line
-  shows as text.
 - Files live on the machine Hermes runs on. A Desktop connected to a remote Hermes still plays and
-  downloads through the card; paths in replies are paths on that host.
+  downloads them; paths in replies are paths on that host.
+- Never write a `::` card directive for a sound, even if an older reply in the chat has one (earlier
+  versions of this plugin used them): Desktop draws the card from the `MEDIA:` line.
 
 ## Verification
 
 - Each delivered sound came from a successful tool result (`success: true`) or an `ok: true` script line.
 - Loops you called seamless have a `loopcheck` verdict of `seamless`.
 - Every length you quoted is a `length_seconds` (or a `probe` result), not a requested duration.
-- On messaging, each file appears on exactly one `MEDIA:` line.
+- Each delivered file appears on exactly one `MEDIA:` line.

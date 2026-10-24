@@ -3,7 +3,6 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
-  cardHandshake,
   isSoundToolCall,
   lengthLabel,
   matches,
@@ -11,7 +10,7 @@ import {
   PromiseCache,
   ratePerSecond,
   SEND_FAILED,
-  soundPrompts,
+  soundIdOf,
   submitToChat
 } from '../src/sound.ts'
 
@@ -98,17 +97,6 @@ test('library search matches every term', () => {
   assert.ok(!matches(rec(), 'glass rain'))
 })
 
-test('the card handshake reads the exact prompt from direct and tool-search calls', () => {
-  const prompt = '  rain 🌧️ on a tin roof\n  then thunder  '
-  assert.deepEqual(soundPrompts('elevenlabs_sound_effect', { prompt }), [prompt])
-  assert.deepEqual(soundPrompts('tool_call', { calls: [{ name: 'elevenlabs_sound_effect', arguments: { prompt } }] }), [prompt])
-  assert.deepEqual(soundPrompts('tool_call', { calls: [{ name: 'elevenlabs_sound_effect', arguments: JSON.stringify({ prompt }) }] }), [prompt])
-  assert.deepEqual(soundPrompts('tool_call', { calls: JSON.stringify([{ name: 'elevenlabs_sound_effect', arguments: { prompt: 'a' } }, { name: 'x', arguments: { prompt: 'b' } }]) }), ['a'])
-  assert.deepEqual(soundPrompts('tool_call', { name: 'elevenlabs_sound_effect', arguments: { prompt: 'legacy' } }), ['legacy'])
-  assert.deepEqual(soundPrompts('web_search', { prompt: 'x' }), [])
-  assert.deepEqual(soundPrompts('elevenlabs_sound_effect', { prompt: 3 }), [])
-})
-
 test('Next keeps the prompt verbatim: no whitespace rewrite, no code-unit slice through an emoji', () => {
   const prompt = `${'🔔'.repeat(300)}\nthen a door slam`
   const variations = nextActions(rec({ prompt }))[0]
@@ -158,40 +146,22 @@ test('decoded sounds are shared, bounded and never cache a failure', async () =>
   assert.equal(await cache.get('x', load('X')), 'X')
 })
 
-test('switching the Desktop half off forgets its sightings only after the ones in flight landed', async () => {
-  const calls = []
-  const lands = []
-  const rest = (path, opts) => {
-    calls.push([opts.method, path, opts.body])
-    if (opts.method === 'POST') return new Promise(resolve => lands.push(resolve))
-    return Promise.resolve({ ok: true })
-  }
-  const handshake = cardHandshake(rest, 'owner-1')
-  handshake.saw('door knock', 'desk-1')
-  handshake.saw('glass tap', undefined) // a host whose events name no chat
-  assert.deepEqual(calls.map(c => c[2]), [
-    { prompt: 'door knock', owner: 'owner-1', session: 'desk-1' },
-    { prompt: 'glass tap', owner: 'owner-1' }
-  ])
-  const closed = handshake.close()
-  lands[0]({ ok: true })
-  await new Promise(resolve => setTimeout(resolve, 20))
-  assert.equal(calls.filter(c => c[0] === 'DELETE').length, 0) // the second POST is still in flight
-  lands[1]({ ok: true })
-  await closed
-  assert.deepEqual(calls.at(-1), ['DELETE', 'card-ready?owner=owner-1', undefined])
-  handshake.saw('late', 'desk-1') // after close: nothing is sent
-  assert.equal(calls.length, 3)
+test('the card draws only this tool\u2019s successful sounds: id from the result, else from the file name', () => {
+  const name = 'sfx_door-knock_20261024_101500_0123456789ab.mp3'
+  assert.equal(soundIdOf({ success: true, sound_id: 'abcdef012345' }, name), 'abcdef012345')
+  assert.equal(soundIdOf(JSON.stringify({ success: true, sound_id: 'abcdef012345' }), name), 'abcdef012345') // reopened chat
+  assert.equal(soundIdOf(null, name), '0123456789ab') // result not kept: the id the tool writes into every name
+  assert.equal(soundIdOf('not json', name), '0123456789ab')
+  assert.equal(soundIdOf({ success: false, error: 'x' }, name), null) // a failed call produced nothing
+  assert.equal(soundIdOf({ error: 'ElevenLabs returned HTTP 400' }, name), null)
+  assert.equal(soundIdOf({ success: true, sound_id: '../../etc' }, 'voice.mp3'), null)
+  assert.equal(soundIdOf({}, 'tts_20261024_101500.mp3'), null)
+  assert.equal(soundIdOf({}, 'sfx_x_20261024_101500_0123456789ab.flac'), null)
 })
 
-test('a failed sighting does not hold up the switch-off', async () => {
-  const calls = []
-  const rest = (path, opts) => {
-    calls.push(opts.method)
-    return opts.method === 'POST' ? Promise.reject(new Error('backend gone')) : Promise.resolve({ ok: true })
+test('Next asks the agent for the MEDIA: line, never a card directive', () => {
+  for (const a of nextActions(rec())) {
+    assert.match(a.message, /media_tag line/)
+    assert.doesNotMatch(a.message, /sound card|desktop_card|::elevenlabs/)
   }
-  const handshake = cardHandshake(rest, 'o')
-  handshake.saw('door knock', 'desk-1')
-  await handshake.close()
-  assert.deepEqual(calls, ['POST', 'DELETE'])
 })

@@ -4,7 +4,8 @@
 prompt_influence?, loop, model_id}`` and the ``xi-api-key`` header returns the audio bytes
 (https://elevenlabs.io/docs/api-reference/text-to-sound-effects/convert). The file lands in
 ``$HERMES_HOME/cache/generated/audio/``, which the gateway may deliver from, and the result carries a
-``MEDIA:<path>`` line the model puts in its reply to send it.
+``MEDIA:<path>`` line the model puts in its reply to send it. Every surface plays that line; Hermes
+Desktop draws it as this plugin's sound card through its tool-media renderer seam (``src/plugin.tsx``).
 
 Model, format and endpoint are user settings (``plugins.entries.<id>.settings``), read per call so a
 multiplexed gateway serves each profile its own; the key comes from the profile's secret scope.
@@ -21,7 +22,6 @@ import math
 import os
 import re
 import threading
-import time
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -67,9 +67,8 @@ SCHEMA = {
         "Generate a sound effect with ElevenLabs (up to 30 s): foley, impacts, ambience, UI sounds, creature "
         "noises, stingers, drum loops. Describe it concretely (source, material, space, intensity), e.g. "
         "'heavy wooden door creaking open in a stone hall'; a length the user names goes in duration_seconds, "
-        "never in the prompt. Reply with the result's media_tag line to deliver "
-        "the audio; in Hermes Desktop, when the result has desktop_card, reply with that line instead (a "
-        "playable card). Billed to the user's ElevenLabs account."
+        "never in the prompt. Put the result's media_tag line on its own line in your reply to deliver the "
+        "audio (it plays on every surface). Billed to the user's ElevenLabs account."
     ),
     "parameters": {
         "type": "object",
@@ -268,28 +267,6 @@ def _download(base_url: str, output_format: str, body: dict, api_key: str):
     return outcome["value"]
 
 
-# Surfaces whose chats a Desktop window draws, as ``ctx.session_surface()`` names them (the surface a
-# chat was started on). Every other surface (chats started in the classic CLI or the TUI, messaging
-# apps, ACP, api_server, webhooks, cron, ...) gets the MEDIA: line even when a Desktop has the same
-# session open and hears its tool events.
-_CARD_SURFACES = frozenset({"desktop"})
-
-
-def _card_session(session_id: str, surface: Callable[[], str] | None) -> str:
-    """This call's session id when the card line may be offered, else ``""``. ``surface`` is the host's
-    public ``ctx.session_surface`` (``None`` on hosts older than that API, which then always get the
-    ``MEDIA:`` line). The card also needs a Desktop to have seen this call start in this same session,
-    which the caller checks next. Inside the plugin host process (``plugins.isolation: host``) the
-    answer is always ``""``: the call delivers the ``MEDIA:`` line, which plays everywhere."""
-    if surface is None or not session_id or os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
-        return ""
-    try:
-        name = surface()
-    except Exception:  # noqa: BLE001 -- the audio is already billed and saved: fall back to MEDIA:
-        return ""
-    return session_id if isinstance(name, str) and name.strip().lower() in _CARD_SURFACES else ""
-
-
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "sound"
 
@@ -307,11 +284,8 @@ def _save(audio: bytes, prompt: str, output_format: str, sound_id: str) -> str:
     return str(path)
 
 
-def generate(args: dict, settings: Callable[[str], Any], session_id: str = "",
-             surface: Callable[[], str] | None = None) -> str:
+def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -> str:
     import httpx
-
-    started = time.time()
 
     api_key = (get_secret(API_KEY_ENV, "") or "").strip()
     if not api_key:
@@ -359,12 +333,6 @@ def generate(args: dict, settings: Callable[[str], Any], session_id: str = "",
                                  f"is {length:g} s long (billing follows the request).")
     if cost := headers.get("character-cost"):
         result["billed_characters"] = cost
-    # Card only when a Desktop that draws it is watching this call; otherwise the MEDIA line, which
-    # every surface (Desktop's own player included) plays.
-    since = started - _provenance.CARD_SLACK_SECONDS
-    card_session = _card_session(session_id, surface) if isinstance(args.get("prompt"), str) else ""
-    if card_session and _provenance.card_ready(args["prompt"], since, {card_session}):
-        result["desktop_card"] = f'::elevenlabs-sfx{{id="{sound_id}"}}'
     _provenance.record({
         "id": sound_id, "prompt": body["text"], "duration_seconds": requested, "length_seconds": length,
         "loop": body["loop"], "prompt_influence": body.get("prompt_influence"), "model": model,

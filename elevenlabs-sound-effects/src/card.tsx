@@ -1,11 +1,13 @@
-// The in-chat sound card: `::elevenlabs-sfx{id="<sound_id>"}`.
+// The in-chat sound card. Desktop draws it for the MEDIA: line of a sound this plugin's tool made (the
+// tool-media renderer seam); `::elevenlabs-sfx{id="<sound_id>"}` lines in chats from earlier versions
+// render it too.
 
-import type { PluginContext } from '@hermes/plugin-sdk'
+import type { PluginContext, ToolMediaRendererProps } from '@hermes/plugin-sdk'
 import { Button, Codicon } from '@hermes/plugin-sdk'
-import { useEffect, useState } from 'react'
+import { type ReactNode, useEffect, useState } from 'react'
 
 import { backendIsRemote, errorText, onScopeChange, statusOf } from './audio.ts'
-import { billed, formatLabel, type HostInfo, lengthLabel, modelLabel, SOUND_ID, type SoundRecord } from './sound.ts'
+import { billed, formatLabel, type HostInfo, lengthLabel, modelLabel, SOUND_ID, soundIdOf, type SoundRecord } from './sound.ts'
 import { Chip, DownloadMenu, NextMenu, S, Transport, useSound, Waveform, Where } from './ui.tsx'
 
 const AUTO_LOAD_BYTES = 4 * 1024 * 1024
@@ -15,13 +17,43 @@ type State =
   | { kind: 'error'; message: string; retry: boolean }
   | { kind: 'ready'; rec: SoundRecord; info: HostInfo }
 
+/**
+ * The card for a `MEDIA:` file Desktop attributes to this plugin's tool. Anything it can't draw as a
+ * sound card (a failed call, a file that is not one of this tool's sounds, a record this profile's
+ * backend does not have) gets the built-in player, so the sound always plays.
+ */
+export function ToolMediaSoundCard({
+  ctx,
+  media,
+  onOpenLibrary
+}: {
+  ctx: PluginContext
+  media: ToolMediaRendererProps
+  onOpenLibrary: () => void
+}) {
+  const id = soundIdOf(media.result, media.file?.name)
+  if (!id || media.file?.kind !== 'audio') return <>{media.fallback}</>
+  return (
+    <SoundCard
+      ctx={ctx}
+      fallback={media.fallback}
+      id={id}
+      onOpenLibrary={onOpenLibrary}
+      sessionId={media.sessionId}
+      source=""
+      streaming={false}
+    />
+  )
+}
+
 export function SoundCard({
   ctx,
   id,
   sessionId,
   streaming,
   source,
-  onOpenLibrary
+  onOpenLibrary,
+  fallback
 }: {
   ctx: PluginContext
   id: string
@@ -29,6 +61,8 @@ export function SoundCard({
   streaming: boolean
   source: string
   onOpenLibrary: () => void
+  /** Tool-media cards: shown instead of an error card when the record can't be read. */
+  fallback?: ReactNode
 }) {
   const valid = SOUND_ID.test(id)
   const [state, setState] = useState<State>({ kind: 'loading' })
@@ -73,6 +107,7 @@ export function SoundCard({
     )
   }
   if (state.kind === 'error') {
+    if (fallback !== undefined) return <>{fallback}</>
     return (
       <div data-sfx-card="error" style={S.card}>
         <span style={S.error}>{state.message}</span>

@@ -19,7 +19,7 @@ attachment on Telegram, Discord, Slack and the other messaging platforms. MP3 (t
 plays inline on most chat apps; Ogg Opus and WAV can arrive as plain files (Telegram shows them that
 way). On Discord, Hermes releases after v0.22.5 send MP3 and WAV as normal attachments that play
 inline (v0.22.5 and earlier sent them as voice messages). In Hermes Desktop the
-sound appears as an inline card (below). In the terminal you get the file path.
+same line becomes an inline sound card (below). In the terminal you get the file path.
 
 The plugin also ships:
 
@@ -27,7 +27,7 @@ The plugin also ships:
 |---|---|
 | `elevenlabs-sound-design` skill | How to write ElevenLabs prompts (from ElevenLabs' own prompting guide), make loops, pick a format for where the sound goes (game engine, video, UI, chat), build a sound pack, and deliver per surface |
 | `sfx_tool.py` (in the skill) | Local post-processing with ffmpeg: trim silence, loudness-normalise, fades, loop-seam click check, convert to OGG/WAV/MP3, pack a named set into a folder + `manifest.json` + zip. Costs no ElevenLabs credits |
-| Desktop sound card | `::elevenlabs-sfx{id="…"}` in a reply renders a card: waveform, play/pause, gapless loop audition, download in each format, reveal, and **Next** actions |
+| Desktop sound card | Each generated sound shows in the chat as a card: waveform, play/pause, gapless loop audition, download in each format, reveal, and **Next** actions (Hermes Desktop with tool-media renderers; older Desktops use their built-in player) |
 | Desktop sound library | ⌘K → **ElevenLabs: open sound library**: every sound this profile made, with its prompt and settings |
 
 ## Install
@@ -87,20 +87,16 @@ agent half): open **Capabilities → Plugins**, switch to the list view, and tur
 **Desktop: ElevenLabs Sound Effects** on the plugin's row. Without it Desktop still plays every sound,
 in its built-in audio player.
 
-**Sound card.** When the Desktop half is on, it tells the plugin's backend each time it sees the tool
-start, and in which chat. That one call, in that chat, then hands the agent a card line,
-`::elevenlabs-sfx{id="<sound_id>"}`, instead of the plain `MEDIA:` line, provided the chat was started in
-Desktop, as Hermes reports it (`ctx.session_surface()`, in Hermes 0.22.3 and newer). In every other case the
-agent gets only the `MEDIA:` line, so a sound never arrives as text you can't play: no Desktop half,
-a Hermes older than 0.22.3 (Desktop then plays the sound in its built-in player), a turn in another
-chat or on another surface (chats started in the classic CLI or the TUI, Telegram and the other messaging apps, the API
-server, webhooks, cron, kanban), a turn whose surface Hermes can't tell, a call that waited more than
-two minutes for approval, and every call when the plugin runs in the plugin host
-(`plugins.isolation: host`). One known gap: two windows
-showing the same chat at the same time, one of which can't draw the card (a CLI or TUI resumed on that Desktop chat, two Desktops on one remote
-Hermes with the half on in only one, or the dashboard's chat view of a Desktop chat). That window
-shows the card line as text; the sound is in
-the library and in `cache/generated/audio`.
+**Sound card.** The tool always hands the agent a plain `MEDIA:` line, the one every surface plays.
+Hermes Desktop works out which tool produced that file and, when it was `elevenlabs_sound_effect` and
+the Desktop half is on, lets this plugin draw it as a sound card instead of the built-in audio player.
+That needs a Hermes Desktop with tool-media renderers (on `main` since commit `567569267a`; first in the
+next release after v0.22.5). On older Desktops, or with the Desktop half off, the same line plays in
+Desktop's built-in player, and so does anything the card can't draw (a sound made in another profile,
+a record that was removed). Nothing depends on which surface a chat was started on, and the agent
+never writes a card line. Chats from earlier versions of this plugin, which used
+`::elevenlabs-sfx{id="<sound_id>"}` lines, still show their cards.
+
 The card shows the prompt, length, loop, model, format and credits billed, a waveform you can click
 to seek, Play/Pause, a **Loop** toggle that repeats the sound gaplessly so you can hear the seam,
 **Download** (the original, or MP3 / WAV / OGG converted by ffmpeg on the machine Hermes runs on;

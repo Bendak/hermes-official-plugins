@@ -161,7 +161,7 @@ export function nextActions(rec: SoundRecord, measured: null | number = null): N
     message:
       `Use ${TOOL} to make 3 variations of this sound ${ref}, one call each with ${argsText(base)}. ` +
       `Cost: ${same.total != null ? `about ${credits(same.total)} each, ${credits(same.total * 3)} in total` : same.line}. ` +
-      'Show each result with its sound card.'
+      "Reply with each result's media_tag line."
   })
 
   const resize = (id: 'longer' | 'shorter', target: number) => {
@@ -171,7 +171,7 @@ export function nextActions(rec: SoundRecord, measured: null | number = null): N
       id,
       label: `${id === 'shorter' ? 'Shorter' : 'Longer'} (${secondsLabel(target)})`,
       cost: cost.line,
-      message: `Use ${TOOL} to make a ${id} version of this sound ${ref} with ${argsText(args)}. Cost: ${cost.line}. Show it with its sound card.`
+      message: `Use ${TOOL} to make a ${id} version of this sound ${ref} with ${argsText(args)}. Cost: ${cost.line}. Reply with its media_tag line.`
     })
   }
   if (length != null && length > 0.5) resize('shorter', clampDuration(length / 2))
@@ -185,7 +185,7 @@ export function nextActions(rec: SoundRecord, measured: null | number = null): N
       cost: same.line,
       message:
         `Use ${TOOL} to make a seamless loop of this sound ${ref} with ${argsText(args)}. Cost: ${same.line}. ` +
-        'Show it with its sound card.'
+        'Reply with its media_tag line.'
     })
   }
 
@@ -196,7 +196,7 @@ export function nextActions(rec: SoundRecord, measured: null | number = null): N
     cost: same.line,
     message:
       `Use ${TOOL} to make this sound ${ref} again with the ${modelLabel(other)} model: ${argsText({ ...base, model: other })}. ` +
-      `Cost: ${same.line}. Show it with its sound card.`
+      `Cost: ${same.line}. Reply with its media_tag line.`
   })
   return out
 }
@@ -235,38 +235,29 @@ function soundCalls(name: unknown, args: unknown): Record<string, unknown>[] {
 /** Does a tool event belong to this plugin's tool (direct, or wrapped by tool search's `tool_call`)? */
 export const isSoundToolCall = (name: unknown, args: unknown): boolean => soundCalls(name, args).length > 0
 
-/** The exact `prompt` strings of this plugin's calls in a `tool.start` event (the card handshake key). */
-export const soundPrompts = (name: unknown, args: unknown): string[] =>
-  soundCalls(name, args).flatMap(a => (typeof a.prompt === 'string' ? [a.prompt] : []))
-
-type RestCall = (path: string, opts: { method: string; body?: unknown; timeoutMs?: number }) => Promise<unknown>
+/** Matches the files the tool writes: `sfx_<slug>_<date>_<time>_<sound id>.<ext>`. */
+const SOUND_FILE = /_([0-9a-f]{12})\.(?:mp3|opus|wav)$/
 
 /**
- * The Desktop half's side of the card handshake. `saw` tells the backend a sound call started in a chat
- * (`session` = the event's session id), so that call answers with the card line. `close` (the half is
- * switched off or unloaded) forgets this instance's sightings, but only after every `saw` still in
- * flight has settled: a DELETE that overtook a late POST would leave a sighting behind, and that call
- * would get a card line nothing draws.
+ * The sound id behind a `MEDIA:` file Desktop attributes to this plugin's tool: the result's
+ * `sound_id` (the result arrives as an object live and can be a JSON string in a reopened chat), else
+ * the id the tool puts at the end of every file name. `null` (draw the built-in player) for a failed
+ * call or anything that is not one of this tool's sounds.
  */
-export function cardHandshake(rest: RestCall, owner: string) {
-  const pending = new Set<Promise<unknown>>()
-  let closed = false
-  return {
-    saw(prompt: string, session: string | undefined): void {
-      if (closed) return
-      const body = session ? { prompt, owner, session } : { prompt, owner }
-      const sent = rest('card-ready', { method: 'POST', body, timeoutMs: 10_000 }).catch(() => undefined)
-      pending.add(sent)
-      void sent.then(() => pending.delete(sent))
-    },
-    async close(): Promise<void> {
-      closed = true
-      await Promise.allSettled([...pending])
-      await rest(`card-ready?owner=${encodeURIComponent(owner)}`, { method: 'DELETE', timeoutMs: 10_000 }).catch(
-        () => undefined
-      )
+export function soundIdOf(result: unknown, fileName: unknown): null | string {
+  let value = result
+  if (typeof value === 'string') {
+    try {
+      value = JSON.parse(value)
+    } catch {
+      value = null
     }
   }
+  const obj = value && typeof value === 'object' && !Array.isArray(value) ? (value as Record<string, unknown>) : null
+  if (obj && (obj.success === false || obj.error != null)) return null
+  if (obj && typeof obj.sound_id === 'string' && SOUND_ID.test(obj.sound_id)) return obj.sound_id
+  const m = typeof fileName === 'string' ? SOUND_FILE.exec(fileName) : null
+  return m ? m[1] : null
 }
 
 /**

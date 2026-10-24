@@ -67,8 +67,29 @@ export interface ConnectionRow {
   primary?: boolean
 }
 
+/** The file a tool-media renderer draws (`transcript.toolMedia`). */
+export interface ToolMediaFile {
+  path: string
+  name: string
+  kind: string
+  mime: string
+  resolveUrl: () => Promise<string>
+}
+/** Props a tool-media renderer receives: the file plus the tool call that produced it. */
+export interface ToolMediaRendererProps {
+  file: ToolMediaFile
+  toolName: string
+  toolCallId: string
+  args: Readonly<Record<string, unknown>>
+  result: unknown
+  sessionId: null | string
+  fallback: ReactNode
+}
+
 export const PALETTE_AREA: string
 export const TRANSCRIPT_DIRECTIVE_AREA: string
+/** Desktops with the tool-media renderer seam only; undefined on older ones (feature-detect it). */
+export const TOOL_MEDIA_RENDERER_AREA: string | undefined
 export const host: {
   composer?: {
     submit: (sessionId: null | string, text: string) => boolean

@@ -13,14 +13,10 @@ outside that folder.
 
 from __future__ import annotations
 
-import contextlib
 import datetime
-import hashlib
 import json
 import os
 import re
-import time
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -35,13 +31,6 @@ _LOCK_OFFSET = 0x7FFFFFFF
 # the length of the audio it returned, which can be longer (loops).
 _FIELDS = ("id", "created_at", "prompt", "duration_seconds", "length_seconds", "loop", "prompt_influence",
            "model", "output_format", "file_name", "bytes", "billed_characters", "session_id")
-# Desktop-card handshake (see ``mark_card_ready``): a hash of each sound prompt the Desktop half saw start.
-SEEN_FILE_NAME = "desktop_cards.jsonl"
-# How long before the tool's handler starts its tool.start sighting may land (the event fires first;
-# an approval prompt can sit between them).
-CARD_SLACK_SECONDS = 120.0
-_SEEN_MAX_BYTES = 64 * 1024
-_SEEN_TAIL_BYTES = 16 * 1024
 
 
 def data_dir() -> Path:
@@ -91,129 +80,6 @@ def _append(name: str, line: str) -> None:
             os.write(fd, line.encode("utf-8"))
     finally:
         os.close(fd)
-
-
-def _prompt_key(prompt: str) -> str:
-    return hashlib.sha256(prompt.encode("utf-8", "surrogatepass")).hexdigest()[:32]
-
-
-@contextlib.contextmanager
-def _seen_lock():
-    """Exclusive lock for the sightings file: appends, trims, clears and the tool's read-and-consume from
-    the plugin host's threads and processes must not drop each other's lines. On Windows it also keeps
-    the tool's read off the file while a trim or clear replaces it (a replace fails on an open file)."""
-    directory = data_dir()
-    directory.mkdir(parents=True, exist_ok=True)
-    fd = os.open(directory / f"{SEEN_FILE_NAME}.lock", os.O_RDWR | os.O_CREAT, 0o600)
-    locked = False
-    try:
-        if os.name == "nt":  # pragma: no cover - exercised by the Windows CI leg
-            import msvcrt
-            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)  # byte 0; LK_LOCK retries for ~10 s before raising
-        else:
-            import fcntl
-            fcntl.flock(fd, fcntl.LOCK_EX)
-        locked = True
-        yield directory / SEEN_FILE_NAME
-    finally:
-        if locked and os.name == "nt":  # pragma: no cover
-            import msvcrt
-            # Unlock explicitly: Windows releases a lock left at close only "when resources allow", and the
-            # next writer would wait for it.
-            os.lseek(fd, 0, os.SEEK_SET)
-            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-        os.close(fd)  # on POSIX closing releases the flock
-
-
-def _rewrite(path: Path, data: bytes) -> None:
-    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
-    try:
-        tmp.write_bytes(data)
-        os.replace(tmp, path)
-    except BaseException:
-        # Disk full or a failed replace: never leave the half-written copy behind.
-        with contextlib.suppress(OSError):
-            tmp.unlink()
-        raise
-
-
-def mark_card_ready(prompt: str, owner: str = "", session: str = "") -> None:
-    """The Desktop half (instance ``owner``) saw a sound tool call with ``prompt`` start in chat
-    ``session`` (the event's session id), so a card for its result will render there. Called by the
-    backend route the Desktop half posts to; the tool reads it back with ``card_ready``. Only a hash of
-    the prompt, the time, the owner token and the session id are stored."""
-    row = {"key": _prompt_key(prompt), "at": round(time.time(), 3), "owner": owner[:64]}
-    if session:
-        row["session"] = session[:256]
-    line = json.dumps(row) + "\n"
-    with _seen_lock() as path:
-        with open(path, "ab") as handle:
-            handle.write(line.encode("utf-8"))
-        if path.stat().st_size > _SEEN_MAX_BYTES:  # keep it small: only the last minutes matter
-            _rewrite(path, path.read_bytes()[-_SEEN_TAIL_BYTES:].split(b"\n", 1)[-1])
-
-
-def clear_card_marks(owner: str = "") -> None:
-    """Desktop half ``owner`` was switched off (or unloaded): forget its sightings, so a call that
-    repeats a recent prompt does not get a card line that nothing will draw. Other Desktops' sightings
-    stay. An empty owner clears every sighting."""
-    with _seen_lock() as path:
-        try:
-            raw = path.read_bytes()
-        except FileNotFoundError:
-            return
-        keep = []
-        for line in raw.splitlines(keepends=True):
-            try:
-                row = json.loads(line)
-            except ValueError:
-                continue
-            if owner and isinstance(row, dict) and row.get("owner") != owner:
-                keep.append(line)
-        _rewrite(path, b"".join(keep))
-
-
-def _pick_sighting(lines: list[bytes], key: str, since: float, sessions: set[str]) -> int | None:
-    """Index of the oldest fresh sighting of this prompt that names one of ``sessions``, or None. A
-    sighting that names no chat vouches for nothing: it can't say which call it saw."""
-    now = time.time()
-    for index, line in enumerate(lines):
-        try:
-            row = json.loads(line)
-        except ValueError:
-            continue
-        if not isinstance(row, dict) or row.get("key") != key:
-            continue
-        at = row.get("at")
-        if isinstance(at, (int, float)) and since <= at <= now + 5 and row.get("session") in sessions:
-            return index
-    return None
-
-
-def card_ready(prompt: str, since: float, sessions: set[str] | frozenset[str]) -> bool:
-    """Did a Desktop with this plugin's Desktop half on see THIS sound call start: same ``prompt``, at or
-    after ``since`` (the caller's start, less ``CARD_SLACK_SECONDS`` for an approval wait), in one of
-    ``sessions`` (the calling turn's session ids)? A sighting that vouches is used up, so it can't vouch
-    for a later call too. False on any doubt: the caller then delivers the plain ``MEDIA:`` line, which
-    every surface plays."""
-    sessions = {s for s in sessions if isinstance(s, str) and s}
-    if not sessions:
-        return False
-    try:
-        with _seen_lock() as path:
-            try:
-                raw = path.read_bytes()
-            except FileNotFoundError:
-                return False
-            lines = raw.splitlines(keepends=True)
-            index = _pick_sighting(lines, _prompt_key(prompt), since, sessions)
-            if index is None:
-                return False
-            del lines[index]
-            _rewrite(path, b"".join(lines))
-            return True
-    except (OSError, ImportError, RuntimeError, ValueError):
-        return False
 
 
 def read_all() -> list[dict[str, Any]]:
