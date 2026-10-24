@@ -317,21 +317,26 @@ def _credits_by_task(key: str) -> dict[str, int]:
 def _gallery_lists(endpoints, limit: int, key: str) -> tuple[list[tuple[str, object]], list[dict]]:
     """Each product's newest tasks, plus ``failed`` (``{"task_type", "error"}``) for the products whose list read
     failed: a plan-gated product (403) or one route's outage never hides the others. Only a refusal of the key
-    itself (401, or 403 on a generic route every plan reads) fails the gallery, and so does every list failing."""
+    itself (401, or 403 on both generic routes every plan reads) fails the gallery, and so does every list failing."""
     lists = _fan_out(lambda e: _meshy_get(f"{e[1]}?page_size={limit}&sort_by=-created_at", key), endpoints)
     generic = {_TASK_ROUTES[t] for t in _PROBE_FIRST}
     listed: list[tuple[str, object]] = []
     failed: list[tuple[str, Exception]] = []
+    generic_refusals = []
     for (task_type, path), future in zip(endpoints, lists):
         try:
             listed.append((task_type, future.result()))
         except urllib.error.HTTPError as exc:
-            if exc.code == 401 or (exc.code == 403 and path in generic):
+            if exc.code == 401:
                 raise _meshy_error(exc) from exc
-            if exc.code != 404:  # 404: a route this account does not have, so nothing to list
+            if exc.code == 403 and path in generic:
+                generic_refusals.append(exc)
+            if exc.code not in (404, 405):  # a route this account does not have, or that does not list
                 failed.append((task_type, exc))
         except (urllib.error.URLError, OSError, ValueError) as exc:
             failed.append((task_type, exc))
+    if len(generic_refusals) == len(generic):  # both refusing is the key or account (an IP allowlist), as in _task
+        raise _meshy_error(generic_refusals[0]) from generic_refusals[0]
     if failed and not listed:
         raise _meshy_error(failed[0][1]) from failed[0][1]
     return listed, [{"task_type": t, "error": _meshy_error(exc).detail} for t, exc in failed]
