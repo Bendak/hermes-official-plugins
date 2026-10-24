@@ -290,8 +290,13 @@ def test_the_card_line_needs_a_desktop_that_saw_the_call_start(loaded, api, _her
 
     seen = module._prov.data_dir() / module._prov.SEEN_FILE_NAME
     stale = json.loads(seen.read_text().splitlines()[-1])
-    seen.write_text(json.dumps({**stale, "at": time.time() - 3600}) + "\n")
-    assert "desktop_card" not in call({"prompt": prompt, "duration_seconds": 2})  # an old sighting
+    seen.write_text(json.dumps({**stale, "at": time.time() - 200}) + "\n")
+    assert "desktop_card" not in call({"prompt": prompt, "duration_seconds": 2})  # an earlier call's sighting
+
+    client.post("/card-ready", json={"prompt": prompt})
+    assert client.delete("/card-ready").json() == {"ok": True}  # the Desktop half was switched off
+    assert "desktop_card" not in call({"prompt": prompt, "duration_seconds": 2})
+    assert client.delete("/card-ready").json() == {"ok": True}  # nothing to forget is fine
 
 
 def test_the_card_handshake_stays_small_and_refuses_junk(loaded, api):

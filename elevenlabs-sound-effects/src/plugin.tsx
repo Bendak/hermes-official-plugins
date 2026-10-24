@@ -87,6 +87,8 @@ const plugin: HermesPlugin = {
       refreshListeners.clear()
       player.dispose()
       clearSoundCache()
+      // Switched off: a call that is still running must not be answered with a card nothing will draw.
+      void ctx.rest('card-ready', { method: 'DELETE', timeoutMs: 10_000 }).catch(() => undefined)
     })
 
     ctx.registerMany([

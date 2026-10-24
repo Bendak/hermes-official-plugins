@@ -35,7 +35,9 @@ _FIELDS = ("id", "created_at", "prompt", "duration_seconds", "length_seconds", "
            "model", "output_format", "file_name", "bytes", "billed_characters", "session_id")
 # Desktop-card handshake (see ``mark_card_ready``): a hash of each sound prompt the Desktop half saw start.
 SEEN_FILE_NAME = "desktop_cards.jsonl"
-CARD_WINDOW_SECONDS = 300.0
+# How long before the tool's handler starts its tool.start sighting may land (the event fires first;
+# an approval prompt can sit between them).
+CARD_SLACK_SECONDS = 120.0
 _SEEN_MAX_BYTES = 64 * 1024
 _SEEN_TAIL_BYTES = 16 * 1024
 
@@ -107,10 +109,19 @@ def mark_card_ready(prompt: str) -> None:
         os.replace(tmp, path)
 
 
-def card_ready(prompt: str, window: float = CARD_WINDOW_SECONDS) -> bool:
-    """Did a Desktop with this plugin's Desktop half on see a sound call with ``prompt`` start within
-    ``window`` seconds? False on any doubt: the caller then delivers the plain ``MEDIA:`` line, which
-    every surface plays."""
+def clear_card_marks() -> None:
+    """The Desktop half was turned off (or unloaded): forget every sighting, so a call that repeats a
+    recent prompt does not get a card line that nothing will draw."""
+    try:
+        (data_dir() / SEEN_FILE_NAME).unlink()
+    except FileNotFoundError:
+        pass
+
+
+def card_ready(prompt: str, since: float) -> bool:
+    """Did a Desktop with this plugin's Desktop half on see a sound call with ``prompt`` start at or
+    after ``since`` (the caller's start, less ``CARD_SLACK_SECONDS`` for an approval wait)? False on any
+    doubt: the caller then delivers the plain ``MEDIA:`` line, which every surface plays."""
     try:
         with open(data_dir() / SEEN_FILE_NAME, "rb") as handle:
             size = handle.seek(0, os.SEEK_END)
@@ -127,7 +138,7 @@ def card_ready(prompt: str, window: float = CARD_WINDOW_SECONDS) -> bool:
         if not isinstance(row, dict) or row.get("key") != key:
             continue
         at = row.get("at")
-        if isinstance(at, (int, float)) and now - window <= at <= now + 5:
+        if isinstance(at, (int, float)) and since <= at <= now + 5:
             return True
     return False
 

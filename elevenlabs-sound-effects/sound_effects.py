@@ -21,6 +21,7 @@ import math
 import os
 import re
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from typing import Any
@@ -287,6 +288,8 @@ def _save(audio: bytes, prompt: str, output_format: str, sound_id: str) -> str:
 def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -> str:
     import httpx
 
+    started = time.time()
+
     api_key = (get_secret(API_KEY_ENV, "") or "").strip()
     if not api_key:
         from hermes_constants import display_hermes_home
@@ -335,7 +338,8 @@ def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -
         result["billed_characters"] = cost
     # Card only when a Desktop that draws it is watching this call; otherwise the MEDIA line, which
     # every surface (Desktop's own player included) plays.
-    if isinstance(args.get("prompt"), str) and _provenance.card_ready(args["prompt"]):
+    since = started - _provenance.CARD_SLACK_SECONDS
+    if isinstance(args.get("prompt"), str) and _provenance.card_ready(args["prompt"], since):
         result["desktop_card"] = f'::elevenlabs-sfx{{id="{sound_id}"}}'
     _provenance.record({
         "id": sound_id, "prompt": body["text"], "duration_seconds": requested, "length_seconds": length,
