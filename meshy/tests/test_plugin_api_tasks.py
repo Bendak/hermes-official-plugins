@@ -665,3 +665,6 @@ def test_made_from_never_shows_a_type_named_project_or_credits_the_task_itself(a
         {"task_id": remesh, "task_type": "remesh", "stage": ""}]}), encoding="utf-8")
     got = api.details(remesh)
     assert (got["prompt"], got["prompt_from"]) == ("a small wooden barrel", preview)
+    # The first task keeps its own project prompt when Meshy's record has none, credited to no other task.
+    got = api.details(preview)
+    assert (got["prompt"], got["prompt_from"]) == ("a small wooden barrel", None)

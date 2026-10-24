@@ -38,7 +38,9 @@ silent for all of it. On a messaging platform:
    turn (its default `wait: true` blocks until the job ends).
 2. In the same turn, arm a wake sized to the job:
    `terminal(command="sleep 180 && echo meshy task <task_id>", background=true, notify_on_complete=true)`
-   (text or image to 3D 180, refine 150, rig or animation 120, remesh or convert 60). When the
+   (text or image to 3D 180, refine 150, rig or animation 120, remesh or convert 60).
+   `background=true` and `notify_on_complete=true` are both required: a sleep without them runs in
+   the foreground and holds the chat exactly like `wait: true`. When the
    sleep exits, Hermes posts its completion into this chat as a new turn for you; the command line
    in that message carries the task id.
 3. On that turn, check once: `meshy_get_task_status` with `wait: false`. Finished: deliver it

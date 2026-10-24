@@ -24,7 +24,8 @@ the animation lives in its own GLB (`basic_animations.walking_glb_url`,
 node <skill_dir>/scripts/render_preview.mjs /abs/path/model.glb --label "Knight"
 ```
 
-`<skill_dir>` is the directory of this skill (the folder holding SKILL.md). Options:
+`<skill_dir>` is the `skill_dir` value skill_view returned for this skill, verbatim (never guess
+`~/.hermes/plugins/...`: another profile or install may hold an older copy). Options:
 `--clip NAME` (default: first clip; substring match), `--list-clips`, `--seconds N`
 (default: 6 s turntable; animations loop whole cycles to at least 4 s, at most 8 s),
 `--fps N` (default 30, 10 to 60), `--size N` (square, default 720), `--max-mb N` (default 8),

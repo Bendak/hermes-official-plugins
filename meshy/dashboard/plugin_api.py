@@ -1415,11 +1415,13 @@ def details(task: str):
                 own[field], inherited = anc, inherited or link["task_id"]
                 break
     # The MCP server names a project after its first task's type when there is no prompt ("convert", "remesh",
-    # ...): that is not a prompt, and a chain that starts at this task has no "original" to credit.
+    # ...): that is not a prompt. The first task's own project prompt is its own, not inherited from itself.
     origin = download_chain[0]["task_id"] if download_chain else None
-    if (not own["prompt"] and not own["image"] and project_prompt and origin and origin != task
+    if (not own["prompt"] and not own["image"] and project_prompt
             and project_prompt not in {c["type"] for c in download_chain} | {"text-to-3d", "image-to-3d"}):
-        own["prompt"], inherited = project_prompt, inherited or origin
+        own["prompt"] = project_prompt
+        if origin != task:
+            inherited = inherited or origin
     prompt, texture, image = own["prompt"], own["texture_prompt"], own["image"]
     image_local = bool(image) and not str(image).startswith(("http://", "https://"))
     if image_local:
