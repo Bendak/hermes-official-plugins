@@ -30,6 +30,8 @@ const plugin: HermesPlugin = {
   name: 'ElevenLabs Sound Effects',
   description: 'Play, loop and download ElevenLabs sound effects inline in chat, and browse every sound in a library tab.',
   register(ctx) {
+    // This instance's token for the card handshake: switching it off clears only its own sightings.
+    const owner = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
     // Bumped when a sound tool call completes or the plugin's settings change: the open library reloads
     // once per bump. Event-driven only; nothing polls.
     let refresh = 0
@@ -75,10 +77,12 @@ const plugin: HermesPlugin = {
     // the tool answers with a MEDIA: line, which Desktop's own player and every other surface play.
     ctx.onEvent('tool.start', event => {
       const profile = currentScope().profile
+      const connection = currentScope().connection
       if (event.replayed || (event.profile && profile && event.profile !== profile)) return
+      if (event.connectionId && connection && event.connectionId !== connection) return
       const payload = (event.payload ?? {}) as { name?: unknown; args?: unknown }
       for (const prompt of soundPrompts(payload.name, payload.args)) {
-        void ctx.rest('card-ready', { method: 'POST', body: { prompt }, timeoutMs: 10_000 }).catch(() => undefined)
+        void ctx.rest('card-ready', { method: 'POST', body: { prompt, owner }, timeoutMs: 10_000 }).catch(() => undefined)
       }
     })
     ctx.onEvent(`plugin.${PLUGIN_ID}.settings.changed`, bump)
@@ -88,7 +92,7 @@ const plugin: HermesPlugin = {
       player.dispose()
       clearSoundCache()
       // Switched off: a call that is still running must not be answered with a card nothing will draw.
-      void ctx.rest('card-ready', { method: 'DELETE', timeoutMs: 10_000 }).catch(() => undefined)
+      void ctx.rest(`card-ready?owner=${owner}`, { method: 'DELETE', timeoutMs: 10_000 }).catch(() => undefined)
     })
 
     ctx.registerMany([

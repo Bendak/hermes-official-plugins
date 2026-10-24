@@ -68,10 +68,12 @@ Keep one sound per call. For a set, make one call per sound with a consistent st
   the bill follows the request. The result's `length_seconds` is the length of the file and
   `length_note` says when it differs; quote that, never the request.
 - Music on a tempo grid: request `duration_seconds` = the bar length (one 4/4 bar at 90 BPM is
-  2.667 s), then read `length_seconds`. `loopfix` shortens a loop by exactly its crossfade, so when the
-  file is longer than the bar, `loopfix --crossfade-ms <(length_seconds - bar) x 1000>` (1-2000 ms)
-  makes it exactly one bar; `probe` the output to confirm. When it is already the bar length, keep it
-  as is if `loopcheck` says `seamless`.
+  2.667 s), then read `length_seconds`. When it differs, don't cut the loop to the bar: the returned
+  length is what repeats seamlessly, and `loopfix` would blend audio that was not written to overlap.
+  Prefer giving the user the tempo the file really has (BPM = 60 x beats / `length_seconds`). If they
+  need the bar length, time-stretch it, `ffmpeg -i IN -af atempo=<length_seconds / bar> OUT.wav`
+  (keeps the pitch), then `probe` and `loopcheck` OUT and report both: measured on real 2.25 s loops
+  it lands within ~20 ms of the bar, not exactly on it, and can add a click at the seam (`loopfix` it).
 - Verify the seam before calling it seamless: run `loopcheck` (below) on the file you deliver and report
   its verdict (`seamless`, `click`, or `silent` for a file with nothing audible in it). When it adds a
   `dip_note`, pass that on as a thing to listen for; it is not a failure and never a reason to
@@ -90,7 +92,7 @@ Keep one sound per call. For a set, make one call per sound with a consistent st
 | Godot, Unity, Unreal, web games | OGG (Vorbis) for music/ambience loops, WAV for short one-shots | engines import both; OGG keeps loops small, WAV avoids decode cost and MP3 padding on one-shots |
 | Video editing (Premiere, Resolve, Final Cut) | WAV 48 kHz | the video standard; no generation loss |
 | App/UI sounds | WAV (or OGG on Android/web) | short, sample-accurate start |
-| Chat (Telegram, Discord, Slack, WhatsApp) | MP3 | plays inline on most chat apps; Ogg Opus and WAV may arrive as plain file attachments (Telegram does this) |
+| Chat (Telegram, Discord, Slack, WhatsApp) | MP3 | plays inline on most chat apps; Ogg Opus and WAV may arrive as plain file attachments (Telegram does this). Discord: Hermes after v0.22.5 sends MP3/WAV as normal attachments that play inline; v0.22.5 and earlier sent them as voice messages |
 
 MP3 adds a short silence at the start (encoder padding), so never use MP3 for gapless loops in an
 engine; convert loops to OGG or WAV.

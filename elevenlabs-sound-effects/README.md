@@ -17,7 +17,8 @@ blip" or "90s hip-hop drum loop, 90 BPM, loopable" and Hermes generates it and s
 the agent a `MEDIA:` line for the file; when the agent puts it in its reply, the file is sent as an
 attachment on Telegram, Discord, Slack and the other messaging platforms. MP3 (the default format)
 plays inline on most chat apps; Ogg Opus and WAV can arrive as plain files (Telegram shows them that
-way). In Hermes Desktop the
+way). On Discord, Hermes releases after v0.22.5 send MP3 and WAV as normal attachments that play
+inline (v0.22.5 and earlier sent them as voice messages). In Hermes Desktop the
 sound appears as an inline card (below). In the terminal you get the file path.
 
 The plugin also ships:
@@ -68,7 +69,9 @@ The tool also takes an optional `model` per call (`eleven_text_to_sound_v2` or
 ## Where files go
 
 Each sound is saved to `<HERMES_HOME>/cache/generated/audio/sfx_<description>_<timestamp>_<id>.<ext>`
-and never overwrites an earlier one. Ask the agent to copy it into your project if you want it
+and never overwrites an earlier one. The Desktop card and library serve a file only while it has a single
+link: a backup tool that hard-links your Hermes folder (rsnapshot, `cp -al`) makes those sounds show
+as gone in Desktop until the extra links are removed (the files themselves are untouched). Ask the agent to copy it into your project if you want it
 somewhere else.
 
 Each generation also appends one line to `<HERMES_HOME>/plugin-data/<plugin namespace>/sounds.jsonl`

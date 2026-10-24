@@ -268,6 +268,16 @@ def _download(base_url: str, output_format: str, body: dict, api_key: str):
     return outcome["value"]
 
 
+def _messaging_turn() -> bool:
+    """Is this call part of a Telegram/Discord/Slack/... turn? A Desktop open on the same profile hears
+    that turn's tool events too, and would vouch for a card nobody on that surface can render."""
+    try:
+        from gateway.session_context import session_is_messaging_surface
+    except ImportError:  # pragma: no cover - every supported host (>= 0.22.0) has it
+        return True
+    return session_is_messaging_surface()
+
+
 def _slug(text: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:40] or "sound"
 
@@ -339,7 +349,8 @@ def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -
     # Card only when a Desktop that draws it is watching this call; otherwise the MEDIA line, which
     # every surface (Desktop's own player included) plays.
     since = started - _provenance.CARD_SLACK_SECONDS
-    if isinstance(args.get("prompt"), str) and _provenance.card_ready(args["prompt"], since):
+    if (isinstance(args.get("prompt"), str) and not _messaging_turn()
+            and _provenance.card_ready(args["prompt"], since)):
         result["desktop_card"] = f'::elevenlabs-sfx{{id="{sound_id}"}}'
     _provenance.record({
         "id": sound_id, "prompt": body["text"], "duration_seconds": requested, "length_seconds": length,

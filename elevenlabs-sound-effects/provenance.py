@@ -13,12 +13,14 @@ outside that folder.
 
 from __future__ import annotations
 
+import contextlib
 import datetime
 import hashlib
 import json
 import os
 import re
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -95,27 +97,61 @@ def _prompt_key(prompt: str) -> str:
     return hashlib.sha256(prompt.encode("utf-8", "surrogatepass")).hexdigest()[:32]
 
 
-def mark_card_ready(prompt: str) -> None:
-    """The Desktop half saw a sound tool call with ``prompt`` start, so a card for its result will
-    render there. Called by the backend route the Desktop half posts to; the tool reads it back with
-    ``card_ready``. Only a hash of the prompt and the time are stored."""
-    line = json.dumps({"key": _prompt_key(prompt), "at": round(time.time(), 3)}) + "\n"
-    _append(SEEN_FILE_NAME, line)
-    path = data_dir() / SEEN_FILE_NAME
-    if path.stat().st_size > _SEEN_MAX_BYTES:  # keep it small: only the last minutes matter
-        keep = path.read_bytes()[-_SEEN_TAIL_BYTES:].split(b"\n", 1)[-1]
-        tmp = path.with_name(f".{SEEN_FILE_NAME}.{os.getpid()}.tmp")
-        tmp.write_bytes(keep)
-        os.replace(tmp, path)
-
-
-def clear_card_marks() -> None:
-    """The Desktop half was turned off (or unloaded): forget every sighting, so a call that repeats a
-    recent prompt does not get a card line that nothing will draw."""
+@contextlib.contextmanager
+def _seen_lock():
+    """Exclusive lock for the sightings file: appends, trims and clears from the plugin host's threads
+    and processes must not drop each other's lines."""
+    directory = data_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    fd = os.open(directory / f"{SEEN_FILE_NAME}.lock", os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        (data_dir() / SEEN_FILE_NAME).unlink()
-    except FileNotFoundError:
-        pass
+        if os.name == "nt":  # pragma: no cover
+            import msvcrt
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+            fcntl.flock(fd, fcntl.LOCK_EX)
+        yield directory / SEEN_FILE_NAME
+    finally:
+        os.close(fd)  # closing releases the lock on every OS
+
+
+def _rewrite(path: Path, data: bytes) -> None:
+    tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+    tmp.write_bytes(data)
+    os.replace(tmp, path)
+
+
+def mark_card_ready(prompt: str, owner: str = "") -> None:
+    """The Desktop half (instance ``owner``) saw a sound tool call with ``prompt`` start, so a card for
+    its result will render there. Called by the backend route the Desktop half posts to; the tool reads
+    it back with ``card_ready``. Only a hash of the prompt, the time and the owner token are stored."""
+    line = json.dumps({"key": _prompt_key(prompt), "at": round(time.time(), 3), "owner": owner[:64]}) + "\n"
+    with _seen_lock() as path:
+        with open(path, "ab") as handle:
+            handle.write(line.encode("utf-8"))
+        if path.stat().st_size > _SEEN_MAX_BYTES:  # keep it small: only the last minutes matter
+            _rewrite(path, path.read_bytes()[-_SEEN_TAIL_BYTES:].split(b"\n", 1)[-1])
+
+
+def clear_card_marks(owner: str = "") -> None:
+    """Desktop half ``owner`` was switched off (or unloaded): forget its sightings, so a call that
+    repeats a recent prompt does not get a card line that nothing will draw. Other Desktops' sightings
+    stay. An empty owner clears every sighting."""
+    with _seen_lock() as path:
+        try:
+            raw = path.read_bytes()
+        except FileNotFoundError:
+            return
+        keep = []
+        for line in raw.splitlines(keepends=True):
+            try:
+                row = json.loads(line)
+            except ValueError:
+                continue
+            if owner and isinstance(row, dict) and row.get("owner") != owner:
+                keep.append(line)
+        _rewrite(path, b"".join(keep))
 
 
 def card_ready(prompt: str, since: float) -> bool:

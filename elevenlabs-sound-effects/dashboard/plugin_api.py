@@ -12,10 +12,10 @@ Routes:
     GET /sound?id=               one sound's record (for the in-chat card)
     GET /audio?id=&format=       the sound's bytes: ``original`` or, when ffmpeg is on this host,
                                  ``mp3`` / ``wav`` / ``ogg`` converted on the fly (nothing is billed)
-    POST /card-ready {prompt}    the Desktop half saw a sound tool call start (its ``tool.start``
+    POST /card-ready {prompt, owner}  the Desktop half saw a sound tool call start (its ``tool.start``
                                  event): the tool then answers with the card line instead of only
                                  ``MEDIA:``, because a Desktop that will draw the card is watching
-    DELETE /card-ready           the Desktop half was switched off: forget those sightings
+    DELETE /card-ready?owner=    that Desktop half was switched off: forget its sightings
 """
 
 from __future__ import annotations
@@ -178,19 +178,20 @@ _MAX_PROMPT_CHARS = 4096
 
 
 @router.post("/card-ready")
-def card_ready(prompt: str = Body(..., embed=True, max_length=_MAX_PROMPT_CHARS)) -> dict:
+def card_ready(prompt: str = Body(..., max_length=_MAX_PROMPT_CHARS),
+               owner: str = Body("", max_length=64)) -> dict:
     try:
-        _prov.mark_card_ready(prompt)
+        _prov.mark_card_ready(prompt, owner)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"could not record the card handshake: {exc.strerror or exc}") from None
     return {"ok": True}
 
 
 @router.delete("/card-ready")
-def card_gone() -> dict:
-    """The Desktop half is going away (switched off or unloaded): no card for calls still running."""
+def card_gone(owner: str = Query("", max_length=64)) -> dict:
+    """Desktop half ``owner`` is going away (switched off or unloaded): no card for its calls still running."""
     try:
-        _prov.clear_card_marks()
+        _prov.clear_card_marks(owner)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"could not clear the card handshake: {exc.strerror or exc}") from None
     return {"ok": True}

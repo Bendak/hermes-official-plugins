@@ -2,8 +2,8 @@
 
 ElevenLabs can return more audio than was asked for (a 1 s loop came back 1.5 s long, 2 s loops 2.25 s),
 so the tool reports the length of the file it saved, not the request. Handles every ``output_format``
-the plugin offers: MP3 (frame scan), WAV (RIFF header) and Ogg Opus (last granule position minus the
-pre-skip). Returns ``None`` for anything it cannot read; it never raises and never runs ffprobe.
+the plugin offers: MP3 (frame scan minus the LAME encoder delay and padding), WAV (RIFF header) and Ogg Opus (last
+granule minus the start offset and pre-skip). Returns ``None`` for anything it cannot read; it never raises and never runs ffprobe.
 """
 
 from __future__ import annotations
@@ -58,6 +58,21 @@ def _info_frame_trim(frame: bytes) -> int | None:
     return (b[0] << 4 | b[1] >> 4) + ((b[1] & 0x0F) << 8 | b[2])
 
 
+def _synced(data: bytes, pos: int, run: int = 3) -> bool:
+    """A frame header at ``pos`` followed by ``run - 1`` more of the same sample rate (or the end of
+    the data): random bytes pass a single header check about once per few hundred bytes."""
+    rate = None
+    for _ in range(run):
+        if rate is not None and (pos == len(data) or data[pos:pos + 3] == b"TAG"):
+            return True  # a short stream that ends exactly after its last frame (or at an ID3v1 tag)
+        frame = _mp3_frame(data, pos)
+        if frame is None or frame[0] <= 4 or (rate is not None and frame[2] != rate):
+            return False
+        rate = frame[2]
+        pos += frame[0]
+    return pos <= len(data)
+
+
 def mp3_seconds(data: bytes) -> float | None:
     pos = 0
     if data[:3] == b"ID3" and len(data) >= 10:
@@ -65,9 +80,9 @@ def mp3_seconds(data: bytes) -> float | None:
         pos = 10 + size + (10 if data[5] & 0x10 else 0)
     samples, rate, first, trim = 0, 0, True, 0
     while pos < len(data):
-        frame = _mp3_frame(data, pos)
+        frame = _mp3_frame(data, pos) if not first or _synced(data, pos) else None
         if frame is None:
-            if first:  # resync once past junk before the first frame
+            if first:  # skip junk before the first frame, to a run of 3 consistent frames
                 nxt = data.find(b"\xff", pos + 1)
                 if nxt < 0:
                     break
@@ -107,16 +122,57 @@ def wav_seconds(data: bytes) -> float | None:
     return None
 
 
+def _ogg_pages(data: bytes):
+    """``(granule, packets completed on this page)`` per Ogg page, in order."""
+    pos = data.find(b"OggS")
+    while 0 <= pos and pos + 27 <= len(data):
+        granule, count = struct.unpack_from("<q", data, pos + 6)[0], data[pos + 26]
+        lacing = data[pos + 27:pos + 27 + count]
+        body = pos + 27 + count
+        packets, start, size = [], body, 0
+        for value in lacing:
+            size += value
+            if value < 255:
+                packets.append(data[start:start + size])
+                start, size = start + size, 0
+        yield granule, packets
+        pos = data.find(b"OggS", body + sum(lacing))
+
+
+# Opus frame length (48 kHz samples) by TOC configuration: SILK 0-11, hybrid 12-15, CELT 16-31.
+_OPUS_FRAME = [480, 960, 1920, 2880] * 3 + [480, 960] * 2 + [120, 240, 480, 960] * 4
+
+
+def _opus_packet_samples(packet: bytes) -> int:
+    if not packet:
+        return 0
+    frame, code = _OPUS_FRAME[packet[0] >> 3], packet[0] & 3
+    if code == 0:
+        return frame
+    if code in (1, 2):
+        return 2 * frame
+    return frame * (packet[1] & 0x3F) if len(packet) > 1 else 0
+
+
 def opus_seconds(data: bytes) -> float | None:
+    """Playable length = last granule - start offset - pre-skip (RFC 7845). The start offset is the
+    first audio page's granule minus the samples its packets carry; ElevenLabs' files have one (its
+    first page claims 312 samples more than it holds), which ffmpeg and browsers honour."""
     head = data.find(b"OpusHead")
-    last = data.rfind(b"OggS")
-    if head < 0 or last < 0 or head + 12 > len(data) or last + 14 > len(data):
+    if head < 0 or head + 12 > len(data):
         return None
     pre_skip = struct.unpack_from("<H", data, head + 10)[0]
-    granule = struct.unpack_from("<q", data, last + 6)[0]
-    if granule <= pre_skip:
+    first = last = None
+    for index, (granule, packets) in enumerate(_ogg_pages(data)):
+        if index < 2 or granule < 0:  # identification + comment headers; -1 = no packet ends here
+            continue
+        if first is None:
+            first = granule - sum(_opus_packet_samples(p) for p in packets)
+        last = granule
+    if first is None or last is None:
         return None
-    return (granule - pre_skip) / 48000  # Opus granule positions always count 48 kHz samples
+    samples = last - max(first, 0) - pre_skip
+    return samples / 48000 if samples > 0 else None  # Opus granules always count 48 kHz samples
 
 
 _READERS = {"mp3": mp3_seconds, "wav": wav_seconds, "opus": opus_seconds}

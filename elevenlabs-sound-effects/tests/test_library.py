@@ -328,3 +328,62 @@ def test_the_reported_length_is_the_returned_audio_not_the_request(loaded, api, 
     assert exact["length_seconds"] == 2.0 and "length_note" not in exact
     auto = call({"prompt": "door knock"})
     assert auto["length_seconds"] == 2.0 and auto["requested_duration_seconds"] is None
+
+
+def test_a_messaging_turn_never_gets_the_card_line(loaded, api):
+    """A Desktop open on the same profile hears a Telegram turn's tool events too and vouches for a
+    card; the Telegram user must still get the MEDIA: line only."""
+    from gateway.session_context import clear_session_vars, set_session_vars
+
+    _, call = loaded
+    _, client = api
+    client.post("/card-ready", json={"prompt": "door knock"})
+    tokens = set_session_vars(platform="telegram", chat_id="111")
+    try:
+        result = call({"prompt": "door knock", "duration_seconds": 1})
+    finally:
+        clear_session_vars(tokens)
+    assert "desktop_card" not in result and result["media_tag"].startswith("MEDIA:")
+    assert "desktop_card" in call({"prompt": "door knock", "duration_seconds": 1})  # the Desktop turn
+
+
+def test_switching_one_desktop_off_keeps_the_other_desktops_cards(loaded, api):
+    _, call = loaded
+    _, client = api
+    client.post("/card-ready", json={"prompt": "glass tap", "owner": "window-a"})
+    client.post("/card-ready", json={"prompt": "door knock", "owner": "window-b"})
+    assert client.delete("/card-ready?owner=window-a").json() == {"ok": True}
+    assert "desktop_card" not in call({"prompt": "glass tap"})
+    assert "desktop_card" in call({"prompt": "door knock"})
+
+
+def test_sightings_writers_wait_for_each_other(loaded, api):
+    """The plugin host serves routes on worker threads (and several processes can serve a profile): an
+    append landing between a trim's read and its replace would be lost, so every write takes the lock."""
+    import threading
+
+    module, _ = api
+    prov = module._prov
+    prov.mark_card_ready("first", "w")
+    seen = prov.data_dir() / prov.SEEN_FILE_NAME
+    before = seen.read_bytes()
+    writer = threading.Thread(target=prov.mark_card_ready, args=("second", "w"))
+    with prov._seen_lock():
+        writer.start()
+        writer.join(0.3)
+        assert writer.is_alive() and seen.read_bytes() == before  # held off while another writer works
+    writer.join(5)
+    assert not writer.is_alive() and prov.card_ready("second", time.time() - 60)
+
+
+def test_many_concurrent_sightings_stay_bounded_and_whole(loaded, api):
+    from concurrent.futures import ThreadPoolExecutor
+
+    module, _ = api
+    prov = module._prov
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(lambda n: prov.mark_card_ready(f"sound {n}", "w"), range(1600)))  # past the 64 KB trim
+    seen = prov.data_dir() / prov.SEEN_FILE_NAME
+    assert seen.stat().st_size <= 64 * 1024
+    assert all(json.loads(line)["key"] for line in seen.read_text().splitlines())  # no torn lines
+    assert prov.card_ready("sound 1599", time.time() - 60)

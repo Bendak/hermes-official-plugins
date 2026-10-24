@@ -20,8 +20,19 @@ def test_mp3_length_counts_frames_minus_the_encoder_delay_and_padding(audio):
     assert audio_seconds(audio.mp3(98, delay=0, padding=0), "mp3") == round(98 * 1152 / 44100, 3)
 
 
-def test_opus_length_is_the_last_granule_minus_the_pre_skip(audio):
+def test_opus_length_drops_the_pre_skip_and_the_start_offset(audio):
     assert audio_seconds(audio.opus(72000), "opus") == 1.5
+    # ElevenLabs' Opus files start 312 samples late (first page granule > its packets): ffmpeg plays 1.000 s.
+    assert audio_seconds(audio.opus(48000, offset=312), "opus") == 1.0
+
+
+def test_random_bytes_are_not_mistaken_for_mp3():
+    import random
+
+    rng = random.Random(7)
+    hits = [n for n in range(1500) if audio_seconds(bytes(rng.getrandbits(8) for _ in range(600)), "mp3")]
+    # One plausible header is not a stream (a single-header check accepted ~28 %); a run of 3 is.
+    assert len(hits) <= 5, len(hits)
 
 
 def test_unreadable_audio_has_no_length_and_never_raises(audio):

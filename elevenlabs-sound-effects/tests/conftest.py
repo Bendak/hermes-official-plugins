@@ -99,14 +99,22 @@ def mp3_bytes(frames: int, delay: int = 576, padding: int = 1575) -> bytes:
     return tag + info + (header + b"\x55" * (size - 4)) * frames
 
 
-def ogg_page(granule: int, payload: bytes, flags: int = 0) -> bytes:
-    return b"OggS\x00" + bytes([flags]) + struct.pack("<qIII", granule, 1, 0, 0) + bytes([1, len(payload)]) + payload
+def ogg_page(granule: int, packets: list[bytes], flags: int = 0) -> bytes:
+    lacing = bytes(len(p) for p in packets)  # every test packet is under 255 bytes: one segment each
+    return (b"OggS\x00" + bytes([flags]) + struct.pack("<qIII", granule, 1, 0, 0) + bytes([len(packets)])
+            + lacing + b"".join(packets))
 
 
-def opus_bytes(samples: int, pre_skip: int = 312) -> bytes:
+def opus_bytes(samples: int, pre_skip: int = 312, offset: int = 0) -> bytes:
+    """Ogg Opus: header pages, then 20 ms CELT packets (TOC 0xfc, 960 samples each) on two pages whose
+    granules count ``offset`` + pre-skip + audio, with end trimming on the last page."""
     head = b"OpusHead\x01\x02" + struct.pack("<HIhB", pre_skip, 48000, 0, 0)
-    return (ogg_page(0, head, 2) + ogg_page(0, b"OpusTags" + b"\x00" * 8)
-            + ogg_page(samples // 2, b"\xfc" * 40) + ogg_page(samples + pre_skip, b"\xfc" * 40, 4))
+    count = -(-(samples + pre_skip) // 960)
+    half = count // 2
+    packet = b"\xfc" + b"\x00" * 39
+    return (ogg_page(0, [head], 2) + ogg_page(0, [b"OpusTags" + b"\x00" * 8])
+            + ogg_page(offset + half * 960, [packet] * half)
+            + ogg_page(offset + samples + pre_skip, [packet] * (count - half), 4))
 
 
 @pytest.fixture
