@@ -117,24 +117,39 @@ export function isMeshyCall(name: unknown, args: unknown): boolean {
   return calls.some(c => !!c && typeof c === 'object' && isMeshyName((c as { name?: unknown }).name))
 }
 
-/** The task id a create call returned: structuredContent.task_id, else the "**Task ID**: …" line. */
+/** The task id a create call returned: structuredContent.task_id, a `task_id` field (the server's
+ * `response_format: "json"`, a JSON string inside `result`), else the "**Task ID**: …" line. */
 export function taskIdFrom(result: unknown): null | string {
   let value: unknown = result
-  for (let i = 0; i < 3 && typeof value === 'string'; i++) {
-    try {
-      value = JSON.parse(value)
-    } catch {
+  for (let depth = 0; depth < 6; depth++) {
+    if (typeof value === 'string') {
+      try {
+        value = JSON.parse(value)
+        continue
+      } catch {
+        break
+      }
+    }
+    if (!value || typeof value !== 'object') {
       break
     }
-  }
-  if (value && typeof value === 'object') {
-    const v = value as { structuredContent?: { task_id?: unknown }; result?: unknown }
+    const v = value as { structuredContent?: { task_id?: unknown }; task_id?: unknown; result?: unknown }
     if (typeof v.structuredContent?.task_id === 'string') {
       return v.structuredContent.task_id
     }
-    value = v.result ?? JSON.stringify(value)
+    if (typeof v.task_id === 'string' && TASK_ID.test(v.task_id)) {
+      return v.task_id
+    }
+    if (v.result == null) {
+      value = JSON.stringify(value)
+      break
+    }
+    value = v.result
   }
-  const m = /\*\*Task ID\*\*:\s*([0-9a-f][0-9a-f-]{15,63})/.exec(String(value ?? ''))
+  const text = String(value ?? '')
+  // The id line in markdown, else a `"task_id": "…"` pair left in text that is not JSON on its own (a
+  // result wrapped in a notice block keeps its inner JSON escaped: `\"task_id\": \"…\"`).
+  const m = /\*\*Task ID\*\*:\s*([0-9a-f][0-9a-f-]{15,63})/.exec(text) ?? /\\*"task_id\\*"\s*:\s*\\*"([0-9a-f][0-9a-f-]{15,63})/.exec(text)
   return m ? m[1] : null
 }
 

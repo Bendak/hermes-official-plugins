@@ -720,11 +720,26 @@ def _whose_refusal(exc: HTTPException, route: str, task_id: str, key: str) -> HT
     return exc
 
 
+_PROBE_LOCKS: dict[tuple[str, str], threading.Lock] = {}
+
+
 def _task(task_id: str, key: str) -> dict:
     """The task record (signed ``model_urls`` / ``result`` / ``image_urls``) from the route that owns it."""
     if not _TASK_ID.fullmatch(task_id or ""):
-        raise HTTPException(status_code=400, detail="task id required")
+        raise HTTPException(status_code=400, detail="not a Meshy task id")
     slot = (hashlib.sha256(key.encode("utf-8", "replace")).hexdigest()[:16], task_id)
+    with _ROUTE_LOCK:
+        lock = _PROBE_LOCKS.setdefault(slot, threading.Lock())
+        while len(_PROBE_LOCKS) > _ROUTE_CACHE_CAP:
+            _PROBE_LOCKS.pop(next(iter(_PROBE_LOCKS)))
+    # One lookup per task at a time: a card mounting twice, the chip and a retry asking together would each fan
+    # out over every route (~34 reads) for an unknown id, past Meshy's 20 req/s, and get 429s. Waiters reuse the
+    # first one's cached route or miss instead.
+    with lock:
+        return _task_locked(slot, task_id, key)
+
+
+def _task_locked(slot: tuple[str, str], task_id: str, key: str) -> dict:
     with _ROUTE_LOCK:
         cached = _ROUTE_CACHE.get(slot)
         missed = _MISS_CACHE.get(slot, 0.0) > time.monotonic()
@@ -808,7 +823,7 @@ def _save_target(task_id: str, beside: str | None) -> tuple[Path, str, Path | No
     """Folder + file stem for a saved format (+ the anchor): next to the model the card shows, else
     meshy_output/<task>. Validates both inputs, so callers run it BEFORE spending a Meshy API call."""
     if not _TASK_ID.fullmatch(task_id or ""):
-        raise HTTPException(status_code=400, detail="task id required")
+        raise HTTPException(status_code=400, detail="not a Meshy task id")
     if beside is not None and not isinstance(beside, str):
         raise HTTPException(status_code=400, detail="beside must be a path")
     if beside:
@@ -1207,7 +1222,7 @@ def _regenerate(row: dict, rec: dict) -> tuple[str, int]:
 @router.get("/actions")
 def actions(task: str):
     if not _TASK_ID.fullmatch(task or ""):
-        raise HTTPException(status_code=400, detail="task id required")
+        raise HTTPException(status_code=400, detail="not a Meshy task id")
     key = _api_key()
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
@@ -1364,7 +1379,7 @@ def _earlier_in(download_chain: list[dict], task: str) -> list[dict]:
 @router.get("/details")
 def details(task: str):
     if not _TASK_ID.fullmatch(task or ""):
-        raise HTTPException(status_code=400, detail="task id required")
+        raise HTTPException(status_code=400, detail="not a Meshy task id")
     prov = _load_prov()
     rec = prov.get(task, {})
     key = _api_key()
@@ -1399,8 +1414,12 @@ def details(task: str):
             if anc := prov.get(link["task_id"], {}).get(field):
                 own[field], inherited = anc, inherited or link["task_id"]
                 break
-    if not own["prompt"] and not own["image"] and project_prompt and project_prompt not in ("text-to-3d", "image-to-3d"):
-        own["prompt"], inherited = project_prompt, inherited or (download_chain[0]["task_id"] if download_chain else None)
+    # The MCP server names a project after its first task's type when there is no prompt ("convert", "remesh",
+    # ...): that is not a prompt, and a chain that starts at this task has no "original" to credit.
+    origin = download_chain[0]["task_id"] if download_chain else None
+    if (not own["prompt"] and not own["image"] and project_prompt and origin and origin != task
+            and project_prompt not in {c["type"] for c in download_chain} | {"text-to-3d", "image-to-3d"}):
+        own["prompt"], inherited = project_prompt, inherited or origin
     prompt, texture, image = own["prompt"], own["texture_prompt"], own["image"]
     image_local = bool(image) and not str(image).startswith(("http://", "https://"))
     if image_local:
@@ -1466,7 +1485,7 @@ def save_images(body: dict):
     """Explicitly download every image in a finished image task; never generate or convert."""
     task = str(body.get("task") or "")
     if not _TASK_ID.fullmatch(task):
-        raise HTTPException(status_code=400, detail="task id required")
+        raise HTTPException(status_code=400, detail="not a Meshy task id")
     key = _api_key()
     if not key:
         raise HTTPException(status_code=400, detail="no Meshy API key")
