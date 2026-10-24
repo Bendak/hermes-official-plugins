@@ -152,7 +152,8 @@ the file names).
    the rest of a set. Completion: the user knows the size of the spend.
 3. Call `elevenlabs_sound_effect`. For variations, call it again with the same prompt (and a lower
    `prompt_influence` for more variety). Completion: each call returned `success` and a `sound_id`.
-4. Post-process only when the destination needs it (format, loudness, trimming, a loop check).
+4. Post-process only when the user asked for it or the destination needs it (loudness, trimming, a
+   loop check, a format for a file they will import elsewhere).
    Completion: the script printed `"ok": true` for every file, or you report its error line.
 5. Deliver: put each sound's `media_tag` (`MEDIA:<file_path>`) on its own line in your reply, with one
    line of text before it. That one line works on every surface: Hermes Desktop plays it, as this
@@ -161,8 +162,10 @@ the file names).
    WhatsApp, Signal and the other messaging apps send it as a file; the CLI shows the path. Rules:
    - The file path appears ONLY on its `MEDIA:` line, never in prose, or messaging apps send it twice.
      Markdown links and images are not delivered.
-   - Files you made from a sound (a `loopfix` result, a conversion, a pack zip) each get their own
-     `MEDIA:<abs path>` line too; say which one to use.
+   - Always deliver the generated sound's own `media_tag`, even when you also converted or processed
+     it: that line is the sound card in Desktop (its Download menu converts to OGG, WAV and MP3 on
+     its own). Files you made from it (a `loopfix` result, a conversion, a pack zip) go on their own
+     `MEDIA:<abs path>` lines after it; say which one to use for what.
    Completion: every sound produced is on exactly one `MEDIA:` line.
 6. A sound pack: generate each sound (steps 3-4), then run `pack`; deliver the zip on its own
    `MEDIA:` line, plus the manifest summary. Completion: the zip exists and
