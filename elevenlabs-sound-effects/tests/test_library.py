@@ -334,16 +334,11 @@ def test_a_sighting_names_the_chat_by_its_ui_tab_id_on_older_hosts(desktop, api)
     assert "desktop_card" in desktop({"prompt": "door knock"}, session="20261023_120000_abcdef", ui="tab-7f3a")
 
 
-def test_an_unnamed_sighting_counts_only_when_it_is_the_only_one(desktop, api):
-    """A Desktop half from before sightings named the chat posts only the prompt: one fresh sighting
-    vouches for one call; two are ambiguous (two chats ran the prompt) and vouch for neither."""
+def test_a_sighting_that_names_no_chat_vouches_for_nothing(desktop, api):
+    """Without the chat, a sighting can't say which call it saw (a CLI session may repeat the prompt)."""
     _, client = api
     client.post("/card-ready", json={"prompt": "glass tap"})
-    assert "desktop_card" in desktop({"prompt": "glass tap"})
-    assert "desktop_card" not in desktop({"prompt": "glass tap"})  # used up
-    client.post("/card-ready", json={"prompt": "glass tap", "owner": "a"})
-    client.post("/card-ready", json={"prompt": "glass tap", "owner": "b"})
-    assert "desktop_card" not in desktop({"prompt": "glass tap"})
+    client.post("/card-ready", json={"prompt": "glass tap", "session": ""})
     assert "desktop_card" not in desktop({"prompt": "glass tap"})
 
 

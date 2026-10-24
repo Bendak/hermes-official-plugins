@@ -174,11 +174,9 @@ def clear_card_marks(owner: str = "") -> None:
 
 
 def _pick_sighting(lines: list[bytes], key: str, since: float, sessions: set[str]) -> int | None:
-    """Index of the sighting that vouches for this call, or None. A sighting that names a chat counts
-    only for that chat. One without (a Desktop half from before chats were sent) counts only when it
-    is the single fresh one for this prompt; two of them are ambiguous and vouch for neither."""
+    """Index of the oldest fresh sighting of this prompt that names one of ``sessions``, or None. A
+    sighting that names no chat vouches for nothing: it can't say which call it saw."""
     now = time.time()
-    exact, unnamed = [], []
     for index, line in enumerate(lines):
         try:
             row = json.loads(line)
@@ -187,17 +185,9 @@ def _pick_sighting(lines: list[bytes], key: str, since: float, sessions: set[str
         if not isinstance(row, dict) or row.get("key") != key:
             continue
         at = row.get("at")
-        if not (isinstance(at, (int, float)) and since <= at <= now + 5):
-            continue
-        session = row.get("session")
-        if isinstance(session, str) and session:
-            if session in sessions:
-                exact.append(index)
-        else:
-            unnamed.append(index)
-    if exact:
-        return exact[0]
-    return unnamed[0] if len(unnamed) == 1 else None
+        if isinstance(at, (int, float)) and since <= at <= now + 5 and row.get("session") in sessions:
+            return index
+    return None
 
 
 def card_ready(prompt: str, since: float, sessions: set[str] | frozenset[str]) -> bool:
