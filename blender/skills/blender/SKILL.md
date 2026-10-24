@@ -15,7 +15,7 @@ Make Blender ready yourself instead of asking the user to open it. Do this befor
 
 - Linux: `blender` on `PATH`; `~/.local/opt/blender-*/blender` (where you install it); flatpak `org.blender.Blender` (run it as `flatpak run org.blender.Blender`); snap `/snap/bin/blender`; Steam `~/.steam/steam/steamapps/common/Blender/blender`, `~/.local/share/Steam/steamapps/common/Blender/blender` or `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Blender/blender`.
 - macOS: `Blender.app` in `/Applications`, `~/Applications` or `~/Library/Application Support/Steam/steamapps/common/Blender/`. Its executable is `<Blender.app>/Contents/MacOS/Blender`.
-- Windows: the folder of the `Blender` entry in the uninstall registry, `$env:ProgramFiles\Blender Foundation\Blender <version>\blender.exe`, or `$env:LOCALAPPDATA\Programs\Blender Foundation\blender-*\blender.exe` (where you install it).
+- Windows: `blender` on `PATH`; the folder of the `Blender` entry in the uninstall registry; `$env:ProgramFiles\Blender Foundation\Blender <version>\blender.exe`; `$env:LOCALAPPDATA\Programs\Blender Foundation\blender-*\blender.exe` (where you install it); the Microsoft Store package, whose `Version` and `InstallLocation` (holding `blender.exe`) come from `Get-AppxPackage BlenderFoundation.Blender`.
 
 None found, or only versions older than 5.1: see *Installing Blender*.
 
