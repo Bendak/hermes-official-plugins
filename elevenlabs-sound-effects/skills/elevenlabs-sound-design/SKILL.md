@@ -121,7 +121,7 @@ the file names).
   capped by a -1.5 dBTP true-peak ceiling, `--fade-ms` adds in/out fades (refused when the two fades
   would cover the whole clip). Without options it only converts. It never overwrites its input. Its
   JSON `output` carries the measured `integrated_lufs` and `true_peak_dbtp`: report the measured
-  loudness, not the target (`applied.loudness_note` says when they differ by more than 1 LU).
+  loudness, not the target (`applied.loudness_note` says when they differ by more than 1 LU; a clip under 0.4 s gets one plain gain, measured looped).
 - `loopfix`: crossfade of the loop's last N ms into its first N ms, gain-matched to how alike the two
   segments are (`seam_correlation`); the result is N ms shorter and its seam jump is gone. An
   anti-correlated seam (`seam_correlation` well below 0) or an attack inside the first N ms can leave

@@ -34,6 +34,8 @@ _LOOP_RATE = 48000
 _SILENT_PEAK = 10  # int16 peak at or below about -70 dBFS: (near-)digital silence
 AUDIO_EXT = {".wav", ".ogg", ".mp3", ".opus", ".flac", ".m4a", ".aac", ".aiff", ".aif", ".webm", ".mka"}
 _LOUDNESS_CEILING_DBTP = -1.5
+_LOOP_MEASURE_SECONDS = 3.0  # a clip too short for one 400 ms EBU R128 block is measured repeated to this length
+_LOOP_EDGE_SECONDS = 10  # loopcheck decodes this much of a long file's head and tail, never the whole file
 
 
 class Failure(Exception):
@@ -115,31 +117,48 @@ def _opus_seconds(path: Path, ffprobe: str) -> float:
     return sum(int(c.strip(",")) for c in counts if c.strip(",").isdigit()) / 48000
 
 
-def measure_loudness(path: Path, ffmpeg: str) -> dict:
-    """Measured integrated loudness (EBU R128) and true peak of a file."""
-    proc = _run([ffmpeg, "-nostdin", "-hide_banner", "-nostats", "-i", str(path), "-vn",
-                 "-af", "ebur128=peak=true", "-f", "null", "-"])
+def measure_loudness(path: Path, ffmpeg: str, *, pre: list[str] | None = None, loops: int = 0) -> dict:
+    """Measured integrated loudness (EBU R128) and true peak of a file (after the PRE filters, played
+    LOOPS extra times). ``integrated_lufs`` is None when nothing could be measured: ebur128 prints its
+    -70 LUFS gate for a clip with no 400 ms block, and that is not a loudness."""
+    loop = ["-stream_loop", str(loops)] if loops else []
+    proc = _run([ffmpeg, "-nostdin", "-hide_banner", "-nostats", *loop, "-i", str(path), "-vn",
+                 "-af", ",".join([*(pre or []), "ebur128=peak=true"]), "-f", "null", "-"])
     text = proc.stderr.decode("utf-8", "replace")
 
     def last(pattern: str) -> float | None:
         found = re.findall(pattern, text)
         return float(found[-1]) if found and found[-1] != "-inf" else None
 
-    return {"integrated_lufs": last(r"\bI:\s+(-?[\d.]+|-inf) LUFS"),
+    integrated = last(r"\bI:\s+(-?[\d.]+|-inf) LUFS")
+    return {"integrated_lufs": integrated if integrated is not None and integrated > -70 else None,
             "true_peak_dbtp": last(r"Peak:\s+(-?[\d.]+|-inf) dBFS")}
 
 
+def _measure_looped(path: Path, ffmpeg: str, ffprobe: str) -> dict:
+    """Loudness of a clip too short to measure, taken over copies of it played back to back."""
+    length = probe(path, ffprobe)["duration_seconds"] or 0.0
+    if length < 0.001:  # nothing left (an all-silent clip after --trim): nothing to loop
+        return {"integrated_lufs": None, "true_peak_dbtp": None}
+    loops = min(30000, math.ceil(_LOOP_MEASURE_SECONDS / length))
+    return measure_loudness(path, ffmpeg, loops=loops)
+
+
+def _trim_filters(trim: bool) -> list[str]:
+    edge = "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.01"
+    return [edge, "areverse", edge, "areverse"] if trim else []
+
+
+def _fade_filters(fade_ms: float) -> list[str]:
+    d = fade_ms / 1000
+    return [f"afade=t=in:d={d:g}", "areverse", f"afade=t=in:d={d:g}", "areverse"] if fade_ms > 0 else []
+
+
 def _filters(trim: bool, loudness: float | None, fade_ms: float) -> list[str]:
-    chain = []
-    if trim:
-        edge = "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.01"
-        chain += [edge, "areverse", edge, "areverse"]
+    chain = _trim_filters(trim)
     if loudness is not None:
         chain.append(f"loudnorm=I={loudness:g}:TP={_LOUDNESS_CEILING_DBTP:g}:LRA=11")
-    if fade_ms > 0:
-        d = fade_ms / 1000
-        chain += [f"afade=t=in:d={d:g}", "areverse", f"afade=t=in:d={d:g}", "areverse"]
-    return chain
+    return chain + _fade_filters(fade_ms)
 
 
 def cmd_probe(args) -> dict:
@@ -212,15 +231,42 @@ def cmd_process(args) -> dict:
     if not 0 <= args.fade_ms <= 5000:
         raise Failure("bad_args", "--fade-ms must be between 0 and 5000")
     before = probe(src, ffprobe)
-    chain = _filters(args.trim, args.loudness, args.fade_ms)
     check = _fade_fits(ffprobe, args.fade_ms, args.trim) if args.fade_ms > 0 else None
-    _encode(ffmpeg, src, out, chain, before["sample_rate"] if args.loudness is not None else None, check)
-    after = {**probe(out, ffprobe), **measure_loudness(out, ffmpeg)}
     applied = {"trim_silence": args.trim, "loudness_target_lufs": args.loudness, "fade_ms": args.fade_ms}
+    # loudnorm measures in 400 ms blocks: a shorter clip reads -70 LUFS and one pass would push it to the ceiling.
+    if args.loudness is not None and measure_loudness(src, ffmpeg, pre=_trim_filters(args.trim))["integrated_lufs"] is None:
+        after = _process_short(args, src, out, before, check, ffmpeg, ffprobe)
+        applied["loudness_gain_db"] = after.pop("gain_db")
+    else:
+        chain = _filters(args.trim, args.loudness, args.fade_ms)
+        _encode(ffmpeg, src, out, chain, before["sample_rate"] if args.loudness is not None else None, check)
+        after = {**probe(out, ffprobe), **measure_loudness(out, ffmpeg)}
     note = _loudness_note(args.loudness, after)
     if note:
         applied["loudness_note"] = note
     return {"ok": True, "input": before, "output": after, "applied": applied}
+
+
+def _process_short(args, src: Path, out: Path, before: dict, check, ffmpeg: str, ffprobe: str) -> dict:
+    """Level a clip too short for loudnorm with one plain gain: measured on the (trimmed) clip played back
+    to back, capped so the true peak stays under the ceiling, reported the same looped way."""
+    trimmed = Path(_temp_beside(out, ".wav"))
+    try:
+        cmd = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn"]
+        _run(cmd + (["-af", ",".join(_trim_filters(args.trim))] if args.trim else []) + ["-c:a", "pcm_f32le", str(trimmed)])
+        level = _measure_looped(trimmed, ffmpeg, ffprobe)
+        gain = 0.0
+        if level["integrated_lufs"] is not None:
+            gain = args.loudness - level["integrated_lufs"]
+            if level["true_peak_dbtp"] is not None:
+                gain = min(gain, _LOUDNESS_CEILING_DBTP - level["true_peak_dbtp"])
+        _encode(ffmpeg, trimmed, out, [f"volume={gain:.2f}dB", *_fade_filters(args.fade_ms)], before["sample_rate"], check)
+    finally:
+        trimmed.unlink(missing_ok=True)
+    looped = _measure_looped(out, ffmpeg, ffprobe)
+    return {**probe(out, ffprobe), "integrated_lufs": looped["integrated_lufs"],
+            "true_peak_dbtp": measure_loudness(out, ffmpeg)["true_peak_dbtp"],
+            "loudness_measured_on": f"the clip looped to {_LOOP_MEASURE_SECONDS:g} s (shorter than one 400 ms EBU R128 block)", "gain_db": round(gain, 2)}
 
 
 def _fade_fits(ffprobe: str, fade_ms: float, trimmed: bool):
@@ -236,7 +282,9 @@ def _fade_fits(ffprobe: str, fade_ms: float, trimmed: bool):
 
 def _loudness_note(target: float | None, measured: dict) -> str | None:
     got, peak = measured.get("integrated_lufs"), measured.get("true_peak_dbtp")
-    if target is None or got is None or abs(got - target) <= 1.0:
+    if target is not None and got is None:
+        return f"aimed at {target:g} LUFS, but the result is (near-)silent: there is no loudness to measure or raise"
+    if target is None or abs(got - target) <= 1.0:
         return None
     held = got < target and peak is not None and peak >= _LOUDNESS_CEILING_DBTP - 0.5
     why = (f"the {_LOUDNESS_CEILING_DBTP:g} dBTP true-peak ceiling held it down" if held
@@ -244,12 +292,13 @@ def _loudness_note(target: float | None, measured: dict) -> str | None:
     return f"aimed at {target:g} LUFS, measured {got:g} LUFS: {why}"
 
 
-def _pcm_frames(ffmpeg: str, src: Path, channels: int, rate: int, *, whole: bool = False) -> array.array:
-    proc = _run([ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-i", str(src), "-vn",
+def _pcm_frames(ffmpeg: str, src: Path, channels: int, rate: int, *, seek: list[str] | None = None) -> array.array:
+    """Decode SRC (or the stretch SEEK picks, e.g. ``["-t", "10"]``) to interleaved int16 samples."""
+    proc = _run([ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", *(seek or []), "-i", str(src), "-vn",
                  "-ac", str(channels), "-ar", str(rate), "-f", "s16le", "-acodec", "pcm_s16le", "-"])
-    if whole and len(proc.stdout) > _MAX_PCM_BYTES:
+    if len(proc.stdout) > _MAX_PCM_BYTES:  # refused, never cut short: a cut file would be judged at the wrong seam
         raise Failure("bad_input", f"{src.name} is too long to process as one loop (over {_MAX_PCM_BYTES // 2**20} MiB of audio)")
-    raw = proc.stdout[:_MAX_PCM_BYTES]
+    raw = proc.stdout
     samples = array.array("h")
     samples.frombytes(raw[: len(raw) - len(raw) % (2 * channels)])
     if sys.byteorder == "big":
@@ -270,7 +319,7 @@ def cmd_loopfix(args) -> dict:
     channels, rate = int(before["channels"] or 2), int(before["sample_rate"] or 48000)
     if out.suffix.lower() == ".opus":
         rate = 48000
-    samples = _pcm_frames(ffmpeg, src, channels, rate, whole=True)
+    samples = _pcm_frames(ffmpeg, src, channels, rate)
     frames = len(samples) // channels
     n = int(rate * args.crossfade_ms / 1000)
     if frames < 3 * n:
@@ -340,13 +389,21 @@ def _rms(chunk) -> float:
     return math.sqrt(sum(v * v for v in chunk) / max(1, len(chunk))) / 32768.0
 
 
+def _level_step_p90(ch: array.array, window: int) -> float:
+    """90th percentile of the level change (dB) between neighbouring WINDOW-long stretches of CH."""
+    levels = [_rms(ch[at: at + window]) for at in range(0, len(ch) - window + 1, window)]
+    steps = sorted(abs(20 * math.log10(max(a, 1e-6) / max(b, 1e-6)))
+                   for a, b in zip(levels, levels[1:]) if max(a, b) >= 0.001)
+    return steps[int(len(steps) * 0.9)] if steps else 0.0
+
+
 def _seam(ch: array.array) -> dict:
     """Seam statistics for ONE channel (a mono mix would cancel anti-phase clicks)."""
     scale = 32768.0
     diffs = sorted(abs(ch[i + 1] - ch[i]) for i in range(0, len(ch) - 1, 7))
     typical = diffs[int(len(diffs) * 0.99)] / scale
     jump = abs(ch[0] - ch[-1]) / scale
-    edge, ms = _LOOP_RATE // 100, _LOOP_RATE // 1000  # 10 ms and 1 ms either side of the seam
+    edge, ms = _LOOP_RATE // 20, _LOOP_RATE // 1000  # 50 ms and 1 ms either side of the seam
     head, tail = _rms(ch[:edge]), _rms(ch[-edge:])
     level_db = 20 * math.log10(max(head, 1e-6) / max(tail, 1e-6))
     # A level dip at the seam is either a fade (a dropout on every repeat) or a loop cut inside a rest
@@ -358,23 +415,38 @@ def _seam(ch: array.array) -> dict:
     # Out of a silent tail, a louder head is a sound starting (an onset), not a discontinuity: only
     # the sample jump can make that a click. A loud tail into a quiet head is a sound cut off.
     onset = level_db > 0 and tail < 0.001
-    # 12 dB, not less: per channel, a hum's level swings a few dB within 10 ms (an anti-correlated
-    # crossfade dips there too), and that is not a click.
-    click = jump > max(2 * typical, 0.02) or (abs(level_db) > 12 and not onset)
+    # 50 ms windows average out a hum's cycle-to-cycle swing, so on steady material a 6 dB step is the level
+    # jumping on every repeat. Rhythmic material (drums) steps further than that between its own windows:
+    # there the seam only counts when it steps more than 9 in 10 of the file's own steps. Between two
+    # near-silent edges a level ratio is noise, not a jump anyone hears.
+    level_limit = max(6.0, _level_step_p90(ch, edge))
+    click = jump > max(2 * typical, 0.02) or (abs(level_db) > level_limit and not onset and max(head, tail) >= 0.001)
     return {"click": click, "seam_jump": jump, "typical_step_p99": typical, "edge_level_difference_db": level_db,
             "seam_dip_db": dip_db}
+
+
+def _loop_edges(ffmpeg: str, src: Path, channels: int, duration: float | None) -> tuple[array.array, float]:
+    """Samples to judge the seam on, and the file's length. A long file is decoded as its first and last
+    ``_LOOP_EDGE_SECONDS`` joined end to end: the seam (last sample -> first) is the same, and the whole
+    file never has to fit in memory."""
+    if duration is None or duration <= 3 * _LOOP_EDGE_SECONDS:
+        samples = _pcm_frames(ffmpeg, src, channels, _LOOP_RATE)
+        return samples, len(samples) // channels / _LOOP_RATE
+    head = _pcm_frames(ffmpeg, src, channels, _LOOP_RATE, seek=["-t", str(_LOOP_EDGE_SECONDS)])
+    tail = _pcm_frames(ffmpeg, src, channels, _LOOP_RATE, seek=["-sseof", f"-{_LOOP_EDGE_SECONDS}"])
+    return head + tail, duration
 
 
 def cmd_loopcheck(args) -> dict:
     src = _input(args.input)
     ffmpeg, ffprobe = _tool("ffmpeg", args.ffmpeg), _tool("ffprobe", args.ffprobe)
-    channels = max(1, min(8, int(probe(src, ffprobe)["channels"] or 1)))
-    samples = _pcm_frames(ffmpeg, src, channels, _LOOP_RATE)
-    frames = len(samples) // channels
-    if frames < _LOOP_RATE // 20:
+    info = probe(src, ffprobe)
+    channels = max(1, min(8, int(info["channels"] or 1)))
+    samples, duration = _loop_edges(ffmpeg, src, channels, info["duration_seconds"])
+    if duration < 0.05:
         raise Failure("bad_input", f"{src.name} is shorter than 50 ms; nothing to loop")
     result = {"ok": True, "file": str(src), "verdict": "silent", "channels_checked": channels,
-              "duration_seconds": round(frames / _LOOP_RATE, 3)}
+              "duration_seconds": round(duration, 3)}
     live = [(c, ch) for c, ch in ((c, samples[c::channels]) for c in range(channels))
             if max(max(ch), -min(ch)) > _SILENT_PEAK]
     if not live:

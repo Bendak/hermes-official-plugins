@@ -285,3 +285,65 @@ def test_pack_names_extensionless_repacked_and_accented_sources(tmp_path):
     junk.write_bytes(b"not audio at all")
     code, out = run("pack", str(repacked), str(junk), "--name", "Q", "--out-dir", str(out_dir))
     assert code == 1 and "notaudio.wav" in out["error"] and "staging" not in out["error"]
+
+
+def wav_mono(path: Path, samples, rate: int = 48000) -> Path:
+    return write_wav(path, [list(samples)], rate)
+
+
+def _mean_db(path: Path) -> float:
+    with wave.open(str(path)) as w:
+        raw = w.readframes(w.getnframes())
+    values = struct.unpack(f"<{len(raw) // 2}h", raw)
+    return 20 * math.log10(math.sqrt(sum(v * v for v in values) / len(values)) / 32768)
+
+
+@needs_ffmpeg
+def test_a_clip_too_short_for_one_loudness_block_is_levelled_and_measured_looped(tmp_path):
+    rate = 48000  # 997 Hz, not 1 kHz: a 48-sample-periodic WAV can probe as MPEG-TS in ffmpeg 9
+    blip = wav_mono(tmp_path / "blip.wav", (1000 * math.sin(2 * math.pi * 997 * i / rate) for i in range(int(0.3 * rate))))
+    code, out = run("process", str(blip), "--out", str(tmp_path / "b.wav"), "--loudness", "-16")
+    assert code == 0 and out["output"]["integrated_lufs"] is not None  # never the -70 "nothing measured" gate
+    assert abs(out["output"]["integrated_lufs"] + 16) <= 1 and "looped" in out["output"]["loudness_measured_on"]
+    gained = _mean_db(tmp_path / "b.wav") - _mean_db(blip)
+    assert abs(gained - out["applied"]["loudness_gain_db"]) <= 0.5 and 10 < gained < 20  # not pushed to the ceiling
+    assert "loudness_note" not in out["applied"]
+    # A peaky short clip: the gain stops at the true-peak ceiling, and the note says so truthfully.
+    spiky = wav_mono(tmp_path / "spiky.wav", (300 * math.sin(2 * math.pi * 997 * i / rate) + (20000 if i == 5000 else 0)
+                                              for i in range(int(0.3 * rate))))
+    out = run("process", str(spiky), "--out", str(tmp_path / "s.wav"), "--loudness", "-16")[1]
+    assert out["output"]["true_peak_dbtp"] <= -1.4 and out["output"]["integrated_lufs"] < -17
+    assert "ceiling" in out["applied"]["loudness_note"]
+    silent = wav_mono(tmp_path / "silent.wav", [0] * int(0.3 * rate))
+    out = run("process", str(silent), "--out", str(tmp_path / "z.wav"), "--loudness", "-16")[1]
+    assert out["output"]["integrated_lufs"] is None and "silent" in out["applied"]["loudness_note"]
+
+
+@needs_ffmpeg
+def test_loopcheck_flags_a_level_jump_at_the_seam_but_not_a_rhythm_that_continues(tmp_path):
+    rate = 48000
+    # A 480 Hz crescendo (whole cycles, so no sample jump) rising 9 dB: every repeat drops back 9 dB.
+    swell = wav_mono(tmp_path / "swell.wav", ((5000 * 10 ** (9 / 20 * i / rate)) * math.sin(2 * math.pi * 480 * i / rate)
+                                               for i in range(rate)))
+    out = run("loopcheck", str(swell))[1]
+    assert out["verdict"] == "click" and abs(out["edge_level_difference_db"]) > 6
+    # A gated texture (100 ms loud, 100 ms at -12 or -15.6 dB): the 12 dB step at the seam is one of its own.
+    def gate(i: int) -> float:
+        period, half = divmod(i // (rate // 10), 2)
+        return 1.0 if half else (0.25 if period % 2 == 0 else 1 / 6)
+    gated = wav_mono(tmp_path / "gated.wav", (16000 * gate(i) * math.sin(2 * math.pi * 480 * i / rate)
+                                              for i in range(int(0.8 * rate))))
+    assert run("loopcheck", str(gated))[1]["verdict"] == "seamless"
+
+
+@needs_ffmpeg
+def test_loopcheck_judges_a_long_file_at_its_real_seam(tmp_path):
+    # 100 s of 8-channel audio decodes to ~77 MB at 48 kHz: the old check stopped at 64 MiB (87.4 s) and
+    # judged a seam in the middle. Here the real end drops 20 dB, so the true seam is a level jump.
+    long_file = tmp_path / "long.flac"
+    subprocess.run(["ffmpeg", "-nostdin", "-loglevel", "error", "-filter_complex",
+                    "sine=f=750:r=8000:d=97[a];sine=f=750:r=8000:d=3,volume=0.1[b];[a][b]concat=n=2:v=0:a=1",
+                    "-ac", "8", str(long_file)], check=True, timeout=60)
+    out = run("loopcheck", str(long_file))[1]
+    assert abs(out["duration_seconds"] - 100) < 0.1 and out["channels_checked"] == 8
+    assert out["verdict"] == "click" and out["edge_level_difference_db"] > 15
