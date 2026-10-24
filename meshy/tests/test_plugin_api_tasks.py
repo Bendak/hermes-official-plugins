@@ -590,10 +590,15 @@ def test_a_refused_key_or_a_total_outage_still_fails_the_gallery(api, meshy):
     meshy.overrides = {_ROUTES["remesh"]: (401, {}, b"{}")}
     err = _status(api.models, limit=10)
     assert (err.status_code, err.detail) == (502, "Meshy rejected the API key")
-    # A refusal on a generic route every plan reads is the key's or the account's (an IP allowlist), not a product's.
-    meshy.overrides = {_ROUTES["image-to-3d"]: (403, {}, b'{"message": "ip_not_authorized"}')}
+    # Both generic routes every plan reads refusing is the key's or the account's (an IP allowlist), not a product's.
+    refused = (403, {}, b'{"message": "ip_not_authorized"}')
+    meshy.overrides = {_ROUTES["image-to-3d"]: refused, _ROUTES["text-to-3d-preview"]: refused}
     err = _status(api.models, limit=10)
     assert err.status_code == 502 and "ip_not_authorized" in err.detail
+    # One of them alone (file filtering on that route) is that product's, as the task lookup treats it.
+    meshy.overrides = {_ROUTES["image-to-3d"]: refused}
+    got = api.models(limit=10)
+    assert len(got["models"]) == 1 and [f["task_type"] for f in got["failed"]] == ["image-to-3d"]
     # Nothing listed at all: the gallery says Meshy is down instead of showing an empty list with 29 notices.
     meshy.overrides = {r: (503, {}, b"{}") for r in set(_ROUTES.values())}
     assert _status(api.models, limit=10).detail == "Meshy API error 503"
