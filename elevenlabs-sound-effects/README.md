@@ -89,15 +89,17 @@ in its built-in audio player.
 
 **Sound card.** When the Desktop half is on, it tells the plugin's backend each time it sees the tool
 start, and in which chat. That one call, in that chat, then hands the agent a card line,
-`::elevenlabs-sfx{id="<sound_id>"}`, instead of the plain `MEDIA:` line. In every other case the agent
-gets only the `MEDIA:` line, so a sound never arrives as text you can't play: no Desktop half, a turn
-in another chat or on another surface (Telegram and the other messaging apps, the API server,
-webhooks, cron, kanban), a turn whose surface Hermes can't tell, a call that waited more than two
-minutes for approval, and every call when the plugin runs in the plugin host
-(`plugins.isolation: host`), where the turn's surface is not known. One known gap: two windows
-showing the same chat at the same time, one of which can't draw the card (a CLI or TUI chat that is
-also open in Desktop, two Desktops on one remote Hermes with the half on in only one, or the
-dashboard's chat view of a Desktop chat). That window shows the card line as text; the sound is in
+`::elevenlabs-sfx{id="<sound_id>"}`, instead of the plain `MEDIA:` line, provided Hermes reports the
+turn as a Desktop turn (`ctx.session_surface()`, in Hermes 0.22.3 and newer). In every other case the
+agent gets only the `MEDIA:` line, so a sound never arrives as text you can't play: no Desktop half,
+a Hermes older than 0.22.3 (Desktop then plays the sound in its built-in player), a turn in another
+chat or on another surface (the classic CLI, the TUI, Telegram and the other messaging apps, the API
+server, webhooks, cron, kanban), a turn whose surface Hermes can't tell, a call that waited more than
+two minutes for approval, and every call when the plugin runs in the plugin host
+(`plugins.isolation: host`). One known gap: two windows
+showing the same chat at the same time, one of which can't draw the card (a CLI or TUI resumed on that Desktop chat, two Desktops on one remote
+Hermes with the half on in only one, or the dashboard's chat view of a Desktop chat). That window
+shows the card line as text; the sound is in
 the library and in `cache/generated/audio`.
 The card shows the prompt, length, loop, model, format and credits billed, a waveform you can click
 to seek, Play/Pause, a **Loop** toggle that repeats the sound gaplessly so you can hear the seam,

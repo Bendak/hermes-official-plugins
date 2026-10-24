@@ -62,19 +62,21 @@ def stand_in():
     server.close()
 
 
-@pytest.fixture
-def loaded(_hermes_home, plugin_root, stand_in, monkeypatch):
+def _load(home: Path, plugin_root: Path, stand_in: _StandIn, monkeypatch):
+    """The plugin installed in ``home`` and loaded by a fresh core ``PluginManager`` (real discovery)."""
     from hermes_cli import plugins as plugins_mod
     from hermes_cli.plugins import PluginManager
     from tools.registry import registry
 
-    shutil.copytree(plugin_root, _hermes_home / "plugins" / PLUGIN,
-                    ignore=shutil.ignore_patterns("tests", "__pycache__", ".pytest_cache", "node_modules"))
-    (_hermes_home / "config.yaml").write_text(yaml.safe_dump({"plugins": {
+    target = home / "plugins" / PLUGIN
+    if not target.exists():
+        shutil.copytree(plugin_root, target,
+                        ignore=shutil.ignore_patterns("tests", "__pycache__", ".pytest_cache", "node_modules"))
+    (home / "config.yaml").write_text(yaml.safe_dump({"plugins": {
         "enabled": [PLUGIN], "entries": {PLUGIN: {"settings": {"api_base_url": stand_in.url}}}}}),
         encoding="utf-8")
-    empty_bundled = _hermes_home.parent / "bundled"
-    empty_bundled.mkdir()
+    empty_bundled = home.parent / "bundled"
+    empty_bundled.mkdir(exist_ok=True)
     monkeypatch.setattr(plugins_mod, "get_bundled_plugins_dir", lambda: empty_bundled)
     monkeypatch.setenv("ELEVENLABS_API_KEY", "xi-test-key")
     manager = PluginManager()
@@ -84,6 +86,12 @@ def loaded(_hermes_home, plugin_root, stand_in, monkeypatch):
     def call(args: dict, session_id: str = "") -> dict:
         return json.loads(registry.dispatch(TOOL, args, scope=manager.scope_key, session_id=session_id))
 
+    return manager, call
+
+
+@pytest.fixture
+def loaded(_hermes_home, plugin_root, stand_in, monkeypatch):
+    manager, call = _load(_hermes_home, plugin_root, stand_in, monkeypatch)
     try:
         yield manager, call
     finally:
@@ -265,24 +273,36 @@ def _write_tone(path: Path, seconds: float = 0.5, rate: int = 48000) -> None:
         out.writeframes(b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * i / rate)))
                                  for i in range(int(seconds * rate))))
 
-# How a generated sound reaches the user. The card line (``desktop_card``) is offered only after a Desktop
-# with this plugin's Desktop half on told the backend it saw THIS call start in THIS chat (``POST
-# /card-ready`` with the event's session id, from its ``tool.start`` listener); otherwise only the
-# ``MEDIA:`` line, which Desktop's built-in player and every messaging surface play, so no surface ever
-# gets a card line it would show as text. Every doubt (unknown surface, no session id, plugin host, two
-# unnamed sightings) answers MEDIA. The length reported is the length of the audio ElevenLabs returned.
+# How a generated sound reaches the user. The card line (``desktop_card``) is offered only when the host's
+# public ``ctx.session_surface()`` says the turn is a Desktop turn AND a Desktop with this plugin's Desktop
+# half on told the backend it saw THIS call start in THIS chat (``POST /card-ready`` with the event's
+# session id, from its ``tool.start`` listener); otherwise only the ``MEDIA:`` line, which Desktop's
+# built-in player and every messaging surface play, so no surface ever gets a card line it would show as
+# text. Every doubt (a host without the API, any other surface, no session id, plugin host, a sighting in
+# another chat) answers MEDIA. The length reported is the length of the audio ElevenLabs returned.
+
+
+def _host_has_surface_api() -> bool:
+    from hermes_cli.plugins import PluginContext
+
+    return callable(getattr(PluginContext, "session_surface", None))
+
+
+needs_surface_api = pytest.mark.skipif(not _host_has_surface_api(),
+                                       reason="this Hermes has no ctx.session_surface(): MEDIA: line only")
 
 
 @pytest.fixture
 def desktop(loaded):
-    """``call`` as a Desktop chat turn: the session context a Desktop turn binds (source, durable id, UI tab
-    id) and the durable id the dispatcher passes the handler."""
+    """``call`` as a turn on ``surface`` (a Desktop chat by default): the turn's session context names its
+    surface the way a messaging turn binds it, which ``ctx.session_surface()`` reports, and the
+    dispatcher passes the handler the session id."""
     from gateway.session_context import clear_session_vars, set_session_vars
 
     _, call = loaded
 
-    def turn(args: dict, session: str = "desk-1", ui: str = "", source: str = "desktop", platform: str = "") -> dict:
-        tokens = set_session_vars(platform=platform, source=source, session_id=session, ui_session_id=ui)
+    def turn(args: dict, session: str = "desk-1", surface: str = "desktop", ui: str = "") -> dict:
+        tokens = set_session_vars(platform=surface, session_id=session, ui_session_id=ui)
         try:
             return call(args, session_id=session)
         finally:
@@ -291,6 +311,7 @@ def desktop(loaded):
     return turn
 
 
+@needs_surface_api
 def test_the_card_line_is_for_the_call_the_desktop_saw_in_that_chat(desktop, api):
     module, client = api
     prompt = "  Rain on a tin roof 🌧️\nthen distant thunder"  # exact bytes, surrounding spaces included
@@ -309,7 +330,7 @@ def test_the_card_line_is_for_the_call_the_desktop_saw_in_that_chat(desktop, api
     see()
     assert "desktop_card" not in desktop({"prompt": "Rain on a tin roof", "duration_seconds": 2})  # other prompt
     # Another chat repeating the prompt (a CLI or TUI session, a second Desktop chat) is not the call seen.
-    assert "desktop_card" not in desktop({"prompt": prompt}, session="cli-session-B", source="local")
+    assert "desktop_card" not in desktop({"prompt": prompt}, session="cli-session-B", surface="cli")
     assert "desktop_card" not in desktop({"prompt": prompt}, session="desk-2")
     assert "desktop_card" in desktop({"prompt": prompt})  # the chat it was seen in still gets it
 
@@ -325,12 +346,14 @@ def test_the_card_line_is_for_the_call_the_desktop_saw_in_that_chat(desktop, api
     assert client.delete("/card-ready").json() == {"ok": True}  # nothing to forget is fine
 
 
-def test_a_sighting_names_the_chat_by_its_ui_tab_id_on_older_hosts(desktop, api):
-    """0.22.x Desktop events carry the UI tab id, not the durable session id the handler gets; the
-    turn's session context has both."""
+@needs_surface_api
+def test_a_sighting_must_name_this_calls_own_session(desktop, api):
+    """The sighting names the chat by the session id the handler is given; any other id (a UI tab id
+    the turn also carries, another chat's id) vouches for nothing."""
     _, client = api
     client.post("/card-ready", json={"prompt": "door knock", "session": "tab-7f3a"})
-    assert "desktop_card" not in desktop({"prompt": "door knock"}, session="20261023_120000_abcdef", ui="tab-0000")
+    assert "desktop_card" not in desktop({"prompt": "door knock"}, session="20261023_120000_abcdef", ui="tab-7f3a")
+    client.post("/card-ready", json={"prompt": "door knock", "session": "20261023_120000_abcdef"})
     assert "desktop_card" in desktop({"prompt": "door knock"}, session="20261023_120000_abcdef", ui="tab-7f3a")
 
 
@@ -342,32 +365,73 @@ def test_a_sighting_that_names_no_chat_vouches_for_nothing(desktop, api):
     assert "desktop_card" not in desktop({"prompt": "glass tap"})
 
 
-@pytest.mark.parametrize("platform", ["telegram", "discord", "api_server", "webhook", "msgraph_webhook", "kanban",
-                                      "codex", "gateway", "cli", "cron"])
-def test_only_a_desktop_turn_gets_the_card_line(desktop, api, platform):
-    """A Desktop with the session open hears the tool events of every turn on it, Telegram, api_server and
-    webhook turns included, and vouches for a card; those surfaces must still get the MEDIA: line only."""
+@needs_surface_api
+@pytest.mark.parametrize("surface", ["cli", "tui", "acp", "local", "telegram", "discord", "api_server", "webhook",
+                                     "msgraph_webhook", "kanban", "cron", "gateway", "desktop-ish", ""])
+def test_only_a_desktop_turn_gets_the_card_line(desktop, api, surface):
+    """A Desktop with the session open hears the tool events of every turn on it (CLI and TUI turns on a
+    shared session, Telegram, api_server and webhook turns) and vouches for a card; those surfaces must
+    still get the MEDIA: line only."""
     _, client = api
     client.post("/card-ready", json={"prompt": "door knock", "session": "desk-1"})
-    result = desktop({"prompt": "door knock"}, source="", platform=platform)
+    result = desktop({"prompt": "door knock"}, surface=surface)
     assert "desktop_card" not in result and result["media_tag"].startswith("MEDIA:")
-    assert "desktop_card" not in desktop({"prompt": "door knock"}, source="desktop", platform=platform)
-    assert "desktop_card" in desktop({"prompt": "door knock"}, source="", platform="local")  # the Desktop turn
+    assert "desktop_card" in desktop({"prompt": "door knock"})  # the same sighting, on the Desktop turn
 
 
-def test_an_unknown_surface_or_session_never_gets_the_card_line(desktop, loaded, api):
+@needs_surface_api
+def test_no_session_context_or_session_id_never_gets_the_card_line(desktop, loaded, api):
     _, call = loaded
     _, client = api
     client.post("/card-ready", json={"prompt": "door knock", "session": "desk-1"})
-    assert "desktop_card" not in desktop({"prompt": "door knock"}, source="")  # no surface known
     assert "desktop_card" not in call({"prompt": "door knock"}, session_id="desk-1")  # no session context at all
+    client.post("/card-ready", json={"prompt": "door knock", "session": ""})
     assert "desktop_card" not in desktop({"prompt": "door knock"}, session="")  # no session id
-    assert "desktop_card" in desktop({"prompt": "door knock"}, source="tui")  # a 0.22.x Desktop backend turn
+    assert "desktop_card" in desktop({"prompt": "door knock"})
 
 
+def test_a_host_without_session_surface_gets_the_media_line_only(_hermes_home, plugin_root, stand_in, api, monkeypatch):
+    """Hermes older than ``ctx.session_surface()`` (0.22.0 to 0.22.2) cannot say which surface a turn is
+    on: the card line is never offered there, Desktop plays the MEDIA: line in its built-in player."""
+    from gateway.session_context import clear_session_vars, set_session_vars
+    from hermes_cli.plugins import PluginContext
+
+    monkeypatch.delattr(PluginContext, "session_surface", raising=False)
+    manager, call = _load(_hermes_home, plugin_root, stand_in, monkeypatch)
+    _, client = api
+    try:
+        client.post("/card-ready", json={"prompt": "door knock", "session": "desk-1"})
+        tokens = set_session_vars(platform="desktop", source="desktop", session_id="desk-1", ui_session_id="desk-1")
+        try:
+            result = call({"prompt": "door knock"}, session_id="desk-1")
+        finally:
+            clear_session_vars(tokens)
+        assert result["success"] is True and "desktop_card" not in result
+        assert result["media_tag"] == f"MEDIA:{result['file_path']}"
+    finally:
+        manager.unload()
+
+
+def test_a_failing_surface_lookup_still_delivers_the_billed_sound(_hermes_home, plugin_root, stand_in, api,
+                                                                  monkeypatch):
+    from hermes_cli.plugins import PluginContext
+
+    def broken(self):
+        raise RuntimeError("no session")
+
+    monkeypatch.setattr(PluginContext, "session_surface", broken, raising=False)
+    manager, call = _load(_hermes_home, plugin_root, stand_in, monkeypatch)
+    _, client = api
+    try:
+        client.post("/card-ready", json={"prompt": "door knock", "session": "desk-1"})
+        result = call({"prompt": "door knock"}, session_id="desk-1")
+        assert result["success"] is True and "desktop_card" not in result and Path(result["file_path"]).is_file()
+    finally:
+        manager.unload()
+
+
+@needs_surface_api
 def test_inside_the_plugin_host_the_card_line_is_never_offered(desktop, api, monkeypatch):
-    """Under ``plugins.isolation: host`` the handler runs in the plugin host process, which gets none of
-    the caller's session context: a Telegram turn would read as a non-messaging one there."""
     _, client = api
     client.post("/card-ready", json={"prompt": "door knock", "session": "desk-1"})
     monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
@@ -377,6 +441,7 @@ def test_inside_the_plugin_host_the_card_line_is_never_offered(desktop, api, mon
     assert "desktop_card" in desktop({"prompt": "door knock"})  # the same sighting, in process
 
 
+@needs_surface_api
 def test_switching_one_desktop_off_keeps_the_other_desktops_cards(desktop, api):
     _, client = api
     client.post("/card-ready", json={"prompt": "glass tap", "owner": "window-a", "session": "desk-1"})
@@ -386,6 +451,7 @@ def test_switching_one_desktop_off_keeps_the_other_desktops_cards(desktop, api):
     assert "desktop_card" in desktop({"prompt": "door knock"})
 
 
+@needs_surface_api
 def test_the_card_handshake_stays_small_and_refuses_junk(desktop, api):
     module, client = api
     assert client.post("/card-ready", json={"prompt": "x" * 5000}).status_code == 422

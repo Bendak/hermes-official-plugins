@@ -268,34 +268,25 @@ def _download(base_url: str, output_format: str, body: dict, api_key: str):
     return outcome["value"]
 
 
-# Surfaces whose turns a Desktop window draws: Desktop's own turns (``local`` on current hosts, ``desktop``
-# or ``tui`` on 0.22.x backends). Every other surface (messaging apps, api_server, webhooks, cron, kanban,
-# ...) gets the MEDIA: line even when a Desktop has its session open.
-_CARD_SURFACES = frozenset({"local", "desktop", "tui"})
+# Clients whose turns a Desktop window draws, as ``ctx.session_surface()`` names them. Every other
+# surface (the classic CLI, the TUI, messaging apps, ACP, api_server, webhooks, cron, ...) gets the
+# MEDIA: line even when a Desktop has the same session open and hears its tool events.
+_CARD_SURFACES = frozenset({"desktop"})
 
 
-def _card_sessions(session_id: str) -> set[str]:
-    """The ids a Desktop sighting may name for this call's chat, or an empty set when the card line must
-    not be offered. Empty unless every surface the turn names is a Desktop surface: a Desktop open on the
-    same session hears the tool events of a Telegram, api_server or webhook turn too, and would vouch for
-    a card nobody on that surface can render. Inside the plugin host process (``plugins.isolation:
-    host``) the caller's session context does not arrive, so the surface is unknown there and the answer
-    is always empty: the call delivers the ``MEDIA:`` line, which plays everywhere."""
-    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
-        return set()
+def _card_session(session_id: str, surface: Callable[[], str] | None) -> str:
+    """This call's session id when the card line may be offered, else ``""``. ``surface`` is the host's
+    public ``ctx.session_surface`` (``None`` on hosts older than that API, which then always get the
+    ``MEDIA:`` line). The card also needs a Desktop to have seen this call start in this same session,
+    which the caller checks next. Inside the plugin host process (``plugins.isolation: host``) the
+    answer is always ``""``: the call delivers the ``MEDIA:`` line, which plays everywhere."""
+    if surface is None or not session_id or os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
+        return ""
     try:
-        from gateway.session_context import get_session_env
-    except ImportError:  # pragma: no cover - every supported host (>= 0.22.0) has it
-        return set()
-    surface = {str(name or "").strip().lower() for name in (
-        os.getenv("HERMES_PLATFORM"), get_session_env("HERMES_SESSION_PLATFORM", ""),
-        get_session_env("HERMES_SESSION_SOURCE", ""))} - {""}
-    if not surface or not surface <= _CARD_SURFACES:
-        return set()
-    # The Desktop event names the chat by its durable id on current hosts and by its UI tab id on
-    # 0.22.x; the tool knows both for its own turn.
-    ids = (session_id, get_session_env("HERMES_UI_SESSION_ID", ""))
-    return {value for value in ids if isinstance(value, str) and value}
+        name = surface()
+    except Exception:  # noqa: BLE001 -- the audio is already billed and saved: fall back to MEDIA:
+        return ""
+    return session_id if isinstance(name, str) and name.strip().lower() in _CARD_SURFACES else ""
 
 
 def _slug(text: str) -> str:
@@ -315,7 +306,8 @@ def _save(audio: bytes, prompt: str, output_format: str, sound_id: str) -> str:
     return str(path)
 
 
-def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -> str:
+def generate(args: dict, settings: Callable[[str], Any], session_id: str = "",
+             surface: Callable[[], str] | None = None) -> str:
     import httpx
 
     started = time.time()
@@ -369,8 +361,8 @@ def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -
     # Card only when a Desktop that draws it is watching this call; otherwise the MEDIA line, which
     # every surface (Desktop's own player included) plays.
     since = started - _provenance.CARD_SLACK_SECONDS
-    sessions = _card_sessions(session_id) if isinstance(args.get("prompt"), str) else set()
-    if sessions and _provenance.card_ready(args["prompt"], since, sessions):
+    card_session = _card_session(session_id, surface) if isinstance(args.get("prompt"), str) else ""
+    if card_session and _provenance.card_ready(args["prompt"], since, {card_session}):
         result["desktop_card"] = f'::elevenlabs-sfx{{id="{sound_id}"}}'
     _provenance.record({
         "id": sound_id, "prompt": body["text"], "duration_seconds": requested, "length_seconds": length,
