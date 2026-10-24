@@ -5,17 +5,19 @@ description: Use when inspecting or editing Blender scenes through the official 
 
 # Blender through MCP
 
-This package launches Blender Lab's MCP server. Installing it changes nothing in Blender: you open Blender when a task needs it, and install Blender Lab's add-on only after the user agrees. A successful MCP tool listing proves server startup, not a connection to Blender.
+This package launches Blender Lab's MCP server. Installing it changes nothing on the computer: you open Blender when a task needs it, and install Blender or Blender Lab's add-on only after the user agrees. A successful MCP tool listing proves server startup, not a connection to Blender.
 
 ## Getting Blender ready
 
 Make Blender ready yourself instead of asking the user to open it. Do this before the first scene call of a task, and again whenever a scene call cannot connect.
 
-**Find Blender once and use that installation for every step below.** Look where the plugin's install check looks, and pick the newest version of 5.1 or later:
+**Find Blender once and use that installation for every step below.** Pick the newest version of 5.1 or later (`<blender> --version` prints it) from:
 
-- Linux: `blender` on `PATH`; flatpak `org.blender.Blender` (run it as `flatpak run org.blender.Blender`); snap `/snap/bin/blender`; Steam `~/.steam/steam/steamapps/common/Blender/blender`, `~/.local/share/Steam/steamapps/common/Blender/blender` or `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Blender/blender`.
+- Linux: `blender` on `PATH`; `~/.local/opt/blender-*/blender` (where you install it); flatpak `org.blender.Blender` (run it as `flatpak run org.blender.Blender`); snap `/snap/bin/blender`; Steam `~/.steam/steam/steamapps/common/Blender/blender`, `~/.local/share/Steam/steamapps/common/Blender/blender` or `~/.var/app/com.valvesoftware.Steam/.local/share/Steam/steamapps/common/Blender/blender`.
 - macOS: `Blender.app` in `/Applications`, `~/Applications` or `~/Library/Application Support/Steam/steamapps/common/Blender/`. Its executable is `<Blender.app>/Contents/MacOS/Blender`.
-- Windows: the folder of the `Blender` entry in the uninstall registry, else `$env:ProgramFiles\Blender Foundation\Blender <version>\blender.exe`.
+- Windows: the folder of the `Blender` entry in the uninstall registry, `$env:ProgramFiles\Blender Foundation\Blender <version>\blender.exe`, or `$env:LOCALAPPDATA\Programs\Blender Foundation\blender-*\blender.exe` (where you install it).
+
+None found, or only versions older than 5.1: see *Installing Blender*.
 
 `<blender>` below is that executable (on Windows, call it as `& "<blender>" ...` in PowerShell, since the path has spaces). The short checks below (`--command extension list`, `--command blender_mcp --help`, `--python-expr`) exit on their own and are not a second Blender window; the headless bridge in step 6 keeps running until stopped.
 
@@ -34,11 +36,21 @@ Make Blender ready yourself instead of asking the user to open it. Do this befor
    Still refused after 30 seconds with the add-on enabled and the port free: in a headless Blender read its output, it prints the reason. In a Blender window the add-on's **Auto Start** is most likely off: ask the user to click **Start MCP Bridge Server** under Edit > Preferences > Add-ons > MCP, where the panel also shows the error if there is one.
 7. **Already running:** never start a second Blender window beside it. With the add-on enabled and the port free, the user most likely opened Blender without online access: ask them to quit Blender so you can reopen it with `--online-mode`, or to turn on **Allow Online Access** (Edit > Preferences > System > Network) and click **Start MCP Bridge Server** under Edit > Preferences > Add-ons > MCP.
 
-If Blender is missing or older than 5.1, say so and link https://www.blender.org/download/. Never install Blender itself.
+### Installing Blender
+
+Ask the user once, and say what will happen: you download Blender <version> from blender.org (about 400 MB, about 1.5 GB once unpacked), install it in their own user folders without administrator rights, and add Blender Lab's MCP add-on (described under *Installing or enabling the add-on*). That one yes covers Blender and the add-on. If they decline, or a step below fails, link https://www.blender.org/download/ and stop.
+
+1. Pick the release: the newest `Blender<major>.<minor>/` folder at https://download.blender.org/release/, then the newest `blender-<version>-<platform>` file in it for this machine: `linux-x64.tar.xz`, `macos-arm64.dmg`, `windows-x64.zip` or `windows-arm64.zip`. Blender 5.1 and later have no build for Intel Macs or Linux on ARM: tell the user and stop.
+2. Download it into your scratch directory with `curl -L -o` (`curl.exe` on Windows), and check it against its line in the `blender-<version>.sha256` file in the same folder (`sha256sum`, `shasum -a 256` on macOS, `Get-FileHash` on Windows). Stop if it differs.
+3. Install it:
+   - Linux: `mkdir -p ~/.local/opt && tar -xJf <file> -C ~/.local/opt`, which gives `~/.local/opt/blender-<version>-linux-x64/blender`. Also link it as `~/.local/bin/blender` (`ln -s`) unless that path already exists, so the `_for_cli` tools find it.
+   - macOS: `hdiutil attach -nobrowse -readonly <file>`, `ditto "<mount point>/Blender.app" /Applications/Blender.app` (`~/Applications/Blender.app` when `/Applications` is not writable or already holds an older Blender the user may want to keep), then `hdiutil detach "<mount point>"`.
+   - Windows: `Expand-Archive <file> -DestinationPath "$env:LOCALAPPDATA\Programs\Blender Foundation"`, which gives `blender-<version>-windows-<arch>\blender.exe` there.
+4. Delete the download, use the new executable as `<blender>`, install the add-on as under *Missing* below without asking again, then continue from step 5 of *Getting Blender ready*.
 
 ### Installing or enabling the add-on
 
-Both change Blender's saved add-on settings and need Blender closed, so a running Blender window must be saved and quit by the user first. Offer once per session, and say what the add-on is: Blender Lab's official add-on that lets this plugin's tools run Python in Blender with the user's privileges, through a local server on port 9876 that has no password, so any program on this computer can use it while Blender is open.
+Both change Blender's saved add-on settings and need Blender closed, so a running Blender window must be saved and quit by the user first. Offer once per session (a yes to *Installing Blender* already covers it), and say what the add-on is: Blender Lab's official add-on that lets this plugin's tools run Python in Blender with the user's privileges, through a local server on port 9876 that has no password, so any program on this computer can use it while Blender is open.
 
 **Disabled** (listed by `extension list`, but `--help` says `Unrecognized`): on yes, enable it. This changes only the add-on list in the saved preferences:
 
