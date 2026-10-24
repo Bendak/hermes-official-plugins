@@ -50,7 +50,7 @@ Ubuntu x86_64, the installed Hermes (`hermes` from the user's install) with a fr
 | Blender present, add-on missing | One question, then add-on install, `--online-mode` launch and a scene read through `get_objects_summary` |
 | Session started without the Blender tools | Gets Blender ready, then asks for `/reload-mcp` or a new chat; sends nothing to port 9876 itself |
 
-The macOS (`.dmg` into `/Applications`) and Windows (`.zip` into `%LOCALAPPDATA%\Programs\Blender Foundation`) install steps are not yet run on a real machine.
+The macOS (`.dmg` into `~/Applications`) and Windows (`.zip` into `%LOCALAPPDATA%\Programs\Blender Foundation`) install steps are not yet run on a real machine.
 
 ## Limits
 
