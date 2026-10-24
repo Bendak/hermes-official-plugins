@@ -152,7 +152,8 @@ const plugin: HermesPlugin = {
     const progressListeners = new Set<(s: ProgressState) => void>()
     // A finished task changes the balance (credits are charged at creation, refunded on failure).
     const progress = createProgressTracker(ctx, s => progressListeners.forEach(fn => fn(s)), refreshBalance, {
-      foreign: isForeignOrigin
+      foreign: isForeignOrigin,
+      scope: () => scopeKey(host.state)
     })
 
     function Chip() {

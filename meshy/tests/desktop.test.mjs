@@ -7,7 +7,7 @@ import { cardChat, OPEN_RETRIES, recordedChat } from '../src/chat.ts'
 import { bestForTask, canRender, openFormat, formatOf, mtlLibOf, mtlTextures, siblingPath } from '../src/formats.ts'
 import { localHeading, reconcileSelection } from '../src/gallery.ts'
 import { createLocalityTracker, localityOf, locatingOs, watchScope } from '../src/scope.ts'
-import { createStatusStore, DEFAULT_SETTINGS } from '../src/status.ts'
+import { balanceLabel, createStatusStore, DEFAULT_SETTINGS } from '../src/status.ts'
 import { createTaskPoller, EARLY_404_MS, httpStatus, MAX_BACKOFF_MS, POLL_MS } from '../src/task-poll.ts'
 import { JSON_UPLOAD_MAX_BYTES, UPLOAD_MAX_BYTES, uploadModel } from '../src/upload.ts'
 
@@ -577,4 +577,15 @@ test('a task card opens the format the backend picked, and GLB on older backends
   assert.equal(openFormat({}), 'glb') // older backend: no view_format
   assert.equal(openFormat(null), 'glb')
   assert.equal(openFormat({ view_format: 'blend' }), 'glb') // never ask /save for a format the viewer cannot draw
+})
+
+test('the balance chip blames the key only for a rejected key, whatever Meshy writes in a 403', () => {
+  const refused = 'Meshy refused the request: Request rejected: IP not allowed'
+  assert.equal(balanceLabel({ configured: true, error: refused, error_code: 'refused' }), 'refused')
+  assert.equal(balanceLabel({ configured: true, error: refused }), 'refused')
+  assert.equal(balanceLabel({ configured: true, error: 'Meshy rejected the API key', error_code: 'key_rejected' }), 'key rejected')
+  assert.equal(balanceLabel({ configured: true, error: 'Meshy rejected the API key' }), 'key rejected')
+  assert.equal(balanceLabel({ configured: true, error: 'Meshy API error 503', error_code: 'offline' }), 'offline')
+  assert.equal(balanceLabel({ configured: false }), 'no key')
+  assert.equal(balanceLabel({ configured: true, balance: 1200 }), `${(1200).toLocaleString()} cr`)
 })

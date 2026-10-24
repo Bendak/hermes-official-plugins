@@ -10,11 +10,13 @@
  *     task per poll, nothing while no task is known to run. Listing every Meshy route instead cost 17 calls per
  *     poll, which crowds Meshy's 20 requests/s per key.
  *
- * A task leaves the watch list when Meshy reports any status other than PENDING / IN_PROGRESS, when its route
- * still does not know it after EARLY_404_MS (a just-created id can lag), or after an hour. Polling backs off on
- * transient failures (3 s → 60 s) and stops on a permanent one (a refused key) or after MAX_FAILURES in a row;
- * the next Meshy tool call re-arms it. Tasks tagged with another profile or connection than the one in front
- * are not polled (ctx.rest reaches the front one, whose key does not own them).
+ * A task leaves the watch list when Meshy reports any status other than PENDING / IN_PROGRESS, when Meshy
+ * still does not know it after EARLY_404_MS (a just-created id can lag), or after an hour. One task whose read
+ * fails (an outage on its route, a route that refuses it) is kept, shows its last row, and is retried on its own
+ * backoff (3 s → 60 s) while the other tasks keep their pace. The whole poll backs off when the backend itself
+ * fails, and stops on a permanent failure (a refused key) or after MAX_FAILURES in a row; the next Meshy tool call
+ * re-arms it. Only tasks seen while the current profile/connection was in front are polled, and none tagged with
+ * another one (ctx.rest reaches the front one, whose key does not own them); switching back resumes them.
  *
  * Meshy tools sit behind tool search, so a call usually arrives as `tool_call` with `args.calls[].name =
  * mcp_meshy_*`, not as a top-level `mcp_meshy_*` name; both are recognised.
@@ -194,14 +196,22 @@ export function awaitedTasks(name: unknown, args: unknown): Array<[string, strin
 
 interface Watched {
   kind: string
+  /** The kind came from the create call, which knows its route; a status call's task_type can be wrong. */
+  created: boolean
   since: number
   origin?: EventOrigin
+  /** scopeKey of the profile/connection in front when the task was seen: the one whose key owns it. */
+  scope: string
+  /** Failed reads of this task in a row, and when to read it again. */
+  fails: number
+  retryAt: number
 }
 
 interface ActiveReply {
   tasks?: ActiveTask[]
   done?: string[]
   missing?: string[]
+  failed?: string[]
 }
 
 const realClock: PollClock = {
@@ -214,13 +224,15 @@ export interface TrackerOptions {
   clock?: PollClock
   /** True when an event's origin is another profile/connection than the one ctx.rest reaches now. */
   foreign?: (origin?: EventOrigin) => boolean
+  /** The profile/connection ctx.rest reaches now (scope.ts scopeKey); events carry no tag on the primary path. */
+  scope?: () => string
 }
 
 export function createProgressTracker(
   ctx: ActiveCtx,
   onChange: (s: ProgressState) => void,
   onIdle: () => void,
-  { clock = realClock, foreign = () => false }: TrackerOptions = {}
+  { clock = realClock, foreign = () => false, scope = () => '' }: TrackerOptions = {}
 ) {
   let state: ProgressState = { running: false, tasks: [], live: null }
   const runningIds = new Set<string>()
@@ -241,6 +253,7 @@ export function createProgressTracker(
     }
   }
 
+  /** Watched tasks the front profile/connection owns, oldest first. */
   const pollable = () => {
     const now = clock.now()
     for (const [id, w] of watched) {
@@ -248,14 +261,18 @@ export function createProgressTracker(
         watched.delete(id)
       }
     }
-    return [...watched].filter(([, w]) => !foreign(w.origin)).slice(-MAX_WATCHED)
+    const front = scope()
+    return [...watched].filter(([, w]) => w.scope === front && !foreign(w.origin))
   }
 
   const schedule = (delay: number) => {
-    if (timer !== undefined || inFlight || disposed || stopped || pollable().length === 0) {
+    const list = pollable()
+    if (timer !== undefined || inFlight || disposed || stopped || list.length === 0) {
       return
     }
-    timer = clock.setTimeout(poll, delay)
+    // Every task waiting out its own backoff: wake for the first one due, not earlier.
+    const due = Math.min(...list.map(([, w]) => w.retryAt)) - clock.now()
+    timer = clock.setTimeout(poll, Math.max(delay, due))
   }
 
   const rearm = (delay: number) => {
@@ -270,11 +287,16 @@ export function createProgressTracker(
 
   function poll() {
     timer = undefined
-    const list = pollable()
-    if (!list.length) {
+    const owned = pollable()
+    if (!owned.length) {
       if (state.tasks.length) {
         set({ tasks: [] })
       }
+      return
+    }
+    const list = owned.filter(([, w]) => w.retryAt <= clock.now()).slice(-MAX_WATCHED)
+    if (!list.length) {
+      schedule(0)
       return
     }
     inFlight = true
@@ -293,8 +315,25 @@ export function createProgressTracker(
             const w = watched.get(id)
             if (w && now - w.since >= EARLY_404_MS) watched.delete(id)
           }
-          const rows = (Array.isArray(res.tasks) ? res.tasks : []).filter(t => watched.has(t.task_id))
-          set({ tasks: rows })
+          const failed = new Set(Array.isArray(res.failed) ? res.failed : [])
+          for (const id of failed) {
+            const w = watched.get(id)
+            if (w) {
+              w.fails += 1
+              w.retryAt = now + backoffMs(w.fails)
+            }
+          }
+          const fresh = (Array.isArray(res.tasks) ? res.tasks : []).filter(t => watched.has(t.task_id))
+          for (const t of fresh) {
+            const w = watched.get(t.task_id)!
+            w.fails = 0
+            w.retryAt = 0
+          }
+          // A task this poll skipped or could not read keeps its last row until it is read again.
+          const shown = new Set(fresh.map(t => t.task_id))
+          const front = new Set(pollable().map(([id]) => id))
+          const kept = state.tasks.filter(t => !shown.has(t.task_id) && front.has(t.task_id) && (failed.has(t.task_id) || !list.some(([id]) => id === t.task_id)))
+          set({ tasks: [...fresh, ...kept] })
         },
         (err: unknown) => {
           if (disposed || at !== generation) return
@@ -315,11 +354,21 @@ export function createProgressTracker(
 
   const payloadOf = (e: EventLike) => (e.payload ?? {}) as Record<string, unknown>
   const originOf = (e: EventLike): EventOrigin => ({ profile: e.profile, connectionId: e.connectionId })
-  const watch = (pairs: Array<[string, string]>, origin: EventOrigin) => {
+  const watch = (pairs: Array<[string, string]>, origin: EventOrigin, created: boolean) => {
     for (const [kind, id] of pairs) {
       const known = watched.get(id)
-      // A status call's real task_type (or a create's route) beats an earlier "any".
-      watched.set(id, { kind: known && kind === ANY_KIND ? known.kind : kind, since: known?.since ?? clock.now(), origin })
+      // A create's route is the task's own: a later status call's task_type never replaces it (Meshy accepts a wrong
+      // one, and the wrong route can refuse or not know the task). A status call's type only replaces an "any".
+      const keep = known && !created && (known.created || kind === ANY_KIND)
+      watched.set(id, {
+        kind: keep ? known.kind : kind,
+        created: created || Boolean(known?.created),
+        since: known?.since ?? clock.now(),
+        origin,
+        scope: scope(),
+        fails: 0,
+        retryAt: 0
+      })
     }
   }
 
@@ -330,7 +379,7 @@ export function createProgressTracker(
         return
       }
       runningIds.add(String(p.tool_id ?? p.name))
-      watch(awaitedTasks(p.name, p.args), originOf(e))
+      watch(awaitedTasks(p.name, p.args), originOf(e), false)
       set({ running: true })
       rearm(1500)
     }),
@@ -340,7 +389,7 @@ export function createProgressTracker(
       if (!runningIds.delete(id) && !isMeshyCall(p.name, p.args)) {
         return
       }
-      watch(startedTasks(p.name, p.args, p.result), originOf(e))
+      watch(startedTasks(p.name, p.args, p.result), originOf(e), true)
       set({ running: runningIds.size > 0, live: runningIds.size > 0 ? state.live : null })
       rearm(1000)
     }),

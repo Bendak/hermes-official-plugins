@@ -52,3 +52,15 @@ def test_the_skill_never_has_the_agent_send_a_markdown_image():
             if "![" in sentence and "never" not in sentence.lower():
                 offenders.append((name, sentence.strip()[:120]))
     assert not offenders, offenders
+
+
+def test_no_doc_promises_unattended_runs_never_spend():
+    """Core reads `approvals.mode: off`, a `--yolo` process and saved Always answers in cron and `chat -q` too, so an
+    unattended run spends up to the spend limit, and without one when `spend_limit: 0`. Every doc that offers those
+    settings says so; the README's refusal sentence is conditional on the defaults."""
+    assert "unattended runs refuse" not in README.lower()
+    assert re.search(r"cannot approve, so with the default settings paid calls are refused", README)
+    for name, text in {"README.md": README, "SKILL.md": SKILL_DOCS["skills/meshy-3d/SKILL.md"]}.items():
+        flat = " ".join(text.split())
+        assert re.search(r"unattended runs.{0,400}without asking.{0,120}spend limit", flat), name
+        assert re.search(r"spend_limit: 0`.{0,200}(no|without any) cap", flat), name

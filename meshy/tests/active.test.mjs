@@ -3,12 +3,12 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { ACTIVE_POLL_MS, awaitedTasks, createProgressTracker, MAX_FAILURES, startedTasks } from '../src/active.ts'
-import { EARLY_404_MS } from '../src/task-poll.ts'
+import { EARLY_404_MS, MAX_BACKOFF_MS } from '../src/task-poll.ts'
 
 const ID = '01a157b8-7317-7551-abc5-000000000001'
 const ID2 = '01a157b8-7317-7551-abc5-000000000002'
 
-function rig({ foreign = () => false } = {}) {
+function rig({ foreign = () => false, scope = () => '' } = {}) {
   let now = 1_000_000
   let timers = []
   let seq = 0
@@ -42,7 +42,7 @@ function rig({ foreign = () => false } = {}) {
   }
   const states = []
   let idles = 0
-  const tracker = createProgressTracker(ctx, s => states.push(s), () => idles++, { clock, foreign })
+  const tracker = createProgressTracker(ctx, s => states.push(s), () => idles++, { clock, foreign, scope })
   const flush = () => new Promise(resolve => setImmediate(resolve))
   return {
     tracker,
@@ -182,4 +182,75 @@ test('a reply read through the previous profile is dropped after a switch', asyn
   release({ tasks: [running(ID, 50)], done: [], missing: [] })
   for (let i = 0; i < 3; i++) await new Promise(resolve => setImmediate(resolve))
   assert.equal(r.states.at(-1).tasks.length, 0)
+})
+
+const queried = path => decodeURIComponent(path.split('tasks=')[1]).split(',')
+const created = (r, id, tool = 'text_to_3d', extra) =>
+  r.emit('tool.complete', { name: `mcp_meshy_meshy_${tool}`, args: {}, result: `**Task ID**: ${id}` }, extra)
+
+test("a status call's task_type never replaces the route the create call recorded", async () => {
+  const r = rig()
+  r.setReply(path => ({ tasks: queried(path).map(q => running(q.split(':')[1], 50)), done: [], missing: [] }))
+  created(r, ID)
+  const status = { tool_id: 's1', name: 'mcp_meshy_meshy_get_task_status', args: { task_id: ID, task_type: 'print-split' } }
+  r.emit('tool.start', status)
+  await r.advance(2000)
+  assert.deepEqual(queried(r.calls.at(-1)), [`text-to-3d:${ID}`])
+  // Seen first through a status call: its type stands until the create's result names the real route.
+  r.emit('tool.start', { ...status, args: { task_id: ID2, task_type: 'print-split' } })
+  await r.advance(2000)
+  assert.ok(queried(r.calls.at(-1)).includes(`print-split:${ID2}`))
+  created(r, ID2, 'rig')
+  await r.advance(1000)
+  assert.deepEqual(queried(r.calls.at(-1)), [`text-to-3d:${ID}`, `rigging:${ID2}`])
+})
+
+test('a task whose read fails keeps its row and retries on its own backoff, never stopping the chip', async () => {
+  const r = rig()
+  let broken = false
+  r.setReply(path => {
+    const ids = queried(path).map(q => q.split(':')[1])
+    const ok = ids.filter(id => !(broken && id === ID2))
+    return { tasks: ok.map(id => running(id, id === ID ? 70 : 30)), done: [], missing: [], failed: ids.filter(id => !ok.includes(id)) }
+  })
+  created(r, ID)
+  created(r, ID2, 'auto_split')
+  await r.advance(1000)
+  assert.equal(r.states.at(-1).tasks.length, 2)
+  broken = true
+  r.calls.length = 0
+  await r.advance(10 * 60_000)
+  const withId = r.calls.filter(c => queried(c).some(q => q.endsWith(ID))).length
+  const withId2 = r.calls.filter(c => queried(c).some(q => q.endsWith(ID2))).length
+  assert.ok(withId >= (10 * 60_000) / ACTIVE_POLL_MS - 2, `the healthy task keeps its pace (${withId} polls)`)
+  assert.ok(withId2 >= 5 && withId2 <= (10 * 60_000) / MAX_BACKOFF_MS + 6, `the failing task backs off (${withId2} reads)`)
+  assert.deepEqual(r.states.at(-1).tasks.map(t => [t.task_id, t.progress]), [[ID, 70], [ID2, 30]])
+  assert.equal(r.tracker.watching().length, 2)
+  assert.ok(r.pending() > 0, 'still polling')
+  broken = false
+  await r.advance(MAX_BACKOFF_MS + ACTIVE_POLL_MS)
+  const last = r.calls.slice(-2).map(c => queried(c).length)
+  assert.ok(last.every(n => n === 2), 'read together again once it answers')
+})
+
+test("untagged tasks seen under one profile are not polled through another's key", async () => {
+  let front = 'A'
+  const r = rig({ scope: () => front })
+  r.setReply(path => ({ tasks: queried(path).map(q => running(q.split(':')[1], 10)), done: [], missing: [] }))
+  created(r, ID)
+  await r.advance(1000)
+  front = 'B'
+  r.tracker.rescope()
+  r.calls.length = 0
+  await r.advance(5 * 60_000)
+  assert.equal(r.calls.length, 0, "profile A's task is never sent to profile B's backend")
+  assert.equal(r.tracker.watching().length, 1, 'and is not dropped as missing there')
+  created(r, ID2)
+  await r.advance(1000)
+  assert.deepEqual(queried(r.calls.at(-1)), [`text-to-3d:${ID2}`])
+  front = 'A'
+  r.tracker.rescope()
+  await r.advance(1000)
+  assert.deepEqual(queried(r.calls.at(-1)), [`text-to-3d:${ID}`])
+  assert.deepEqual(r.states.at(-1).tasks.map(t => t.task_id), [ID])
 })

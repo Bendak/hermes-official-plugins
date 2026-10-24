@@ -94,7 +94,8 @@ _MODEL_TYPES = ("text-to-3d", "image-to-3d", "multi-image-to-3d", "remesh", "ret
                 *(t for t in _TASK_ROUTES if t.startswith("creative-lab-") and not t.endswith("-prototype")))
 _MODEL_ENDPOINTS = tuple((t, _TASK_ROUTES[t]) for t in _MODEL_TYPES)
 _IMAGE_ENDPOINTS = tuple((t, _TASK_ROUTES[t]) for t in ("text-to-image", "image-to-image"))
-# Meshy allows 20 requests/s per key: list and probe fan-outs share this many in-flight calls.
+# Meshy allows 20 requests/s per key: list and probe fan-outs share this many in-flight calls (_FANOUT_SLOTS),
+# and the progress chip's per-task reads get as many of their own (_ACTIVE_SLOTS), so at most 2 x _FANOUT run.
 _FANOUT = 4
 
 
@@ -166,10 +167,18 @@ def _meshy_get(path: str, key: str, timeout: float = 15.0):
         raise urllib.error.URLError(exc) from exc
 
 
+class _KeyRefused(HTTPException):
+    """Meshy refused this key or account outright (401, or a 403 on the generic routes every plan reads): no task
+    read can succeed until the user fixes it, unlike a refusal on one product route."""
+
+
+_KEY_REJECTED = "Meshy rejected the API key"
+
+
 def _meshy_error(exc: Exception) -> HTTPException:
     if isinstance(exc, urllib.error.HTTPError):
         # 401 is the key; 403 is an IP allowlist, org IP filtering or a plan-gated route, and Meshy's body says which.
-        detail = {401: "Meshy rejected the API key"}.get(exc.code) or (
+        detail = {401: _KEY_REJECTED}.get(exc.code) or (
             f"Meshy refused the request: {_meshy_message(exc)}" if exc.code == 403 else f"Meshy API error {exc.code}")
         return HTTPException(status_code=502, detail=detail)
     return HTTPException(status_code=502, detail="Meshy API unreachable")
@@ -190,6 +199,9 @@ def _disk_error(exc: OSError) -> HTTPException:
 
 
 _FANOUT_SLOTS = threading.BoundedSemaphore(_FANOUT)
+# Separate from _FANOUT_SLOTS on purpose: an untyped chip read runs _task, whose probe takes _FANOUT_SLOTS, so a
+# chip read holding one of those while waiting for another would deadlock every probe in the process.
+_ACTIVE_SLOTS = threading.BoundedSemaphore(_FANOUT)
 
 
 def _fan_out(fn, items) -> list:
@@ -282,8 +294,11 @@ def status():
     try:
         bal = _meshy_get("/openapi/v1/balance", key)
     except (urllib.error.URLError, OSError, ValueError) as exc:
-        # The status chip shows WHY there is no number (bad key vs offline) instead of a stale one.
-        return {"configured": True, "settings": _settings(), "error": _meshy_error(exc).detail}
+        # The status chip shows WHY there is no number (bad key vs refused vs offline) instead of a stale one. It
+        # reads error_code: the detail quotes Meshy's own 403 text, which can say anything ("Request rejected: ...").
+        code = getattr(exc, "code", None) if isinstance(exc, urllib.error.HTTPError) else None
+        return {"configured": True, "settings": _settings(), "error": _meshy_error(exc).detail,
+                "error_code": {401: "key_rejected", 403: "refused"}.get(code, "offline")}
     bal = bal if isinstance(bal, dict) else {}
     return {"configured": True, "settings": _settings(), "balance": bal.get("balance"),
             "monthly_credits": bal.get("monthly_credits"), "permanent_credits": bal.get("permanent_credits"),
@@ -640,7 +655,7 @@ def _task_at(route: str, task_id: str, key: str) -> dict | None:
         if exc.code in (400, 404):
             return None
         if exc.code == 401:  # a revoked or mistyped key: permanent until the user fixes it, so a 4xx
-            raise HTTPException(status_code=403, detail="Meshy rejected the API key") from exc
+            raise _KeyRefused(status_code=403, detail=_KEY_REJECTED) from exc
         if exc.code == 403:  # IP allowlist, org file filtering or a plan-gated route: Meshy says which
             raise HTTPException(status_code=403, detail=f"Meshy refused the request: {_meshy_message(exc)}") from exc
         raise _meshy_error(exc) from exc
@@ -694,7 +709,7 @@ def _task(task_id: str, key: str) -> dict:
         try:
             row = _task_at(route, task_id, key)
         except HTTPException as exc:
-            if exc.status_code != 403 or exc.detail == "Meshy rejected the API key":
+            if exc.status_code != 403 or isinstance(exc, _KeyRefused):
                 raise
             refused.append(exc)  # the task may still be on its own route
             continue
@@ -717,8 +732,10 @@ def _task(task_id: str, key: str) -> dict:
     # An outage (the card retries) outranks a refusal (the card stops); neither is remembered as a miss. A
     # refusal only on other routes is a plan-gated product, not this task: "no such task" as before.
     outage = next((e for e in errors if e.status_code >= 500), None)
-    if outage or refused:
-        raise outage or refused[0]
+    if outage:
+        raise outage
+    if refused:
+        raise _KeyRefused(status_code=403, detail=refused[0].detail)
     _remember(slot, None)
     raise HTTPException(status_code=404, detail="Meshy has no finished task with that id")
 
@@ -1024,15 +1041,27 @@ def _active_wanted(tasks: str) -> list[tuple[str, str]]:
 
 
 def _active_read(kind: str, task_id: str, key: str) -> dict | None:
-    """The task from its own route; "any" (a status call that named no type) uses the cached lookup instead."""
-    if kind != "any":
-        return _task_at(_route_for(kind), task_id, key)
-    try:
-        return _task(task_id, key)
-    except HTTPException as exc:
-        if exc.status_code == 404:
-            return None
-        raise
+    """The task from its own route, else by lookup (cached after the first read): "any" (a status call that named
+    no type) goes straight to the lookup, and so does a named route that does not know the task or refuses it. A
+    status call's ``task_type`` can be a real route name and still be wrong, and Meshy's server accepts that."""
+    with _ACTIVE_SLOTS:
+        if kind != "any":
+            try:
+                row = _task_at(_route_for(kind), task_id, key)
+            except _KeyRefused:
+                raise
+            except HTTPException as exc:
+                if exc.status_code != 403:
+                    raise
+                row = None  # a plan-gated product route, or the wrong one: the lookup decides
+            if row is not None:
+                return row
+        try:
+            return _task(task_id, key)
+        except HTTPException as exc:
+            if exc.status_code == 404:
+                return None
+            raise
 
 
 def _active_row(kind: str, task_id: str, row: dict) -> dict:
@@ -1044,29 +1073,35 @@ def _active_row(kind: str, task_id: str, row: dict) -> dict:
 @router.get("/active")
 def active(tasks: str = ""):
     """Status and Meshy's progress % of the named tasks (``kind:id,...``): ``tasks`` holds the ones still PENDING /
-    IN_PROGRESS (newest first), ``done`` the ids that reached any other status, ``missing`` the ids the task's own
-    route does not know (yet). One read per task on its own route; a refused key or an outage fails the request."""
+    IN_PROGRESS (newest first), ``done`` the ids that reached any other status, ``missing`` the ids Meshy does not
+    know (yet), ``failed`` the ids whose read failed this time (an outage, or a route that refuses that one task;
+    the chip keeps them and retries). Only a refusal of the key itself fails the whole request: it fails every read."""
     key = _api_key()
     if not key:
-        return {"configured": False, "tasks": [], "done": [], "missing": []}
+        return {"configured": False, "tasks": [], "done": [], "missing": [], "failed": []}
     wanted = _active_wanted(tasks)
-    running, done, missing = [], [], []
-    # Not _fan_out: an "any" read runs _task, whose probe takes _FANOUT_SLOTS itself, so holding a slot out here
-    # would let four such reads hold every slot while each waits for one (every probe in the process hangs).
+    running, done, missing, failed = [], [], [], []
     with ThreadPoolExecutor(max_workers=_FANOUT) as pool:
         reads = [pool.submit(_active_read, kind, task_id, key) for kind, task_id in wanted]
     for (kind, task_id), found in zip(wanted, reads):
-        row = found.result()  # HTTPException (403 refused key, 502 outage) reaches the chip, which stops or backs off
-        if row is not None and kind == "any":
-            kind = _TYPE_ENDPOINT.get(str(row.get("type") or ""), str(row.get("type") or "any"))
+        try:
+            row = found.result()
+        except _KeyRefused:
+            raise  # 403: the chip stops until the next Meshy call
+        except HTTPException:
+            failed.append(task_id)
+            continue
         if row is None:
             missing.append(task_id)
-        elif row.get("status") in _ACTIVE_STATUSES:
+            continue
+        if str(row.get("type") or ""):  # the record's own type, whatever kind the caller guessed
+            kind = _TYPE_ENDPOINT.get(str(row["type"]), str(row["type"]))
+        if row.get("status") in _ACTIVE_STATUSES:
             running.append(_active_row(kind, task_id, row))
         else:
             done.append(task_id)
     running.sort(key=lambda t: t["created_at"] if isinstance(t["created_at"], (int, float)) else 0, reverse=True)
-    return {"configured": True, "tasks": running, "done": done, "missing": missing}
+    return {"configured": True, "tasks": running, "done": done, "missing": missing, "failed": failed}
 
 
 # Card buttons. Each one SENDS A CHAT MESSAGE (the agent runs the tool behind Hermes' approval card); the
