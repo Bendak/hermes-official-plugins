@@ -121,7 +121,7 @@ def test_asset_failures_never_claim_the_api_key_was_rejected(api, monkeypatch, s
     assert err.value.status_code == (410 if status in (401, 403, 404, 410) else 502)
     if status == 403:
         # API authentication remains a different failure from a denied CDN signature.
-        assert "API key" in api._meshy_error(urllib.error.HTTPError(url, status, "", {}, None)).detail
+        assert "API key" in api._meshy_error(urllib.error.HTTPError(url, 401, "", {}, None)).detail
 
 
 def test_gallery_includes_image_sets_expiry_and_local_fallback(api, monkeypatch):
