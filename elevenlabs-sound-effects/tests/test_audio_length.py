@@ -42,8 +42,8 @@ def test_unreadable_audio_has_no_length_and_never_raises(audio):
 
 
 def test_a_length_the_bytes_cannot_hold_is_no_length(audio):
-    """One corrupt byte in the last Ogg page's granule made a 1.5 s file read as months; a WAV header
-    with a byte rate of 1 does the same. No real file in these formats is under ~6 kbit/s."""
+    """One corrupt byte in the last Ogg page's granule made a 1.5 s file read as months (an Opus length is
+    bounded by the samples its packets carry); a WAV header with a byte rate of 1 does the same."""
     import struct
 
     opus = bytearray(audio.opus(72000))
@@ -54,6 +54,23 @@ def test_a_length_the_bytes_cannot_hold_is_no_length(audio):
     struct.pack_into("<I", wav, wav.find(b"fmt ") + 16, 1)  # byte rate
     assert audio_seconds(bytes(wav), "wav") is None
     assert audio_seconds(audio.opus(72000), "opus") == 1.5 and audio_seconds(audio.wav(1.0), "wav") == 1.0
+
+
+def test_mostly_silent_opus_keeps_its_length(audio):
+    """libopus codes digital silence in 3-byte packets (about 1.2 kbit/s at 20 ms): a byte-rate floor
+    would call a real, quiet file unreadable."""
+    import struct
+
+    head = b"OpusHead\x01\x02" + struct.pack("<HIhB", 312, 48000, 0, 0)
+    silence = b"\xfc\xff\xfe"  # CELT 20 ms
+    pages = [audio.page(0, [head], 2), audio.page(0, [b"OpusTags" + b"\x00" * 8])]
+    granule = 0
+    for page in range(10):  # 10 pages x 50 packets x 960 samples = 10 s, less the 312-sample pre-skip
+        granule += 50 * 960
+        pages.append(audio.page(granule, [silence] * 50, 4 if page == 9 else 0))
+    data = b"".join(pages)
+    assert len(data) * 8 / 10 < 2000  # under 2 kbit/s
+    assert audio_seconds(data, "opus") == round((480000 - 312) / 48000, 3)
 
 
 def test_the_mp3_start_is_looked_for_only_in_the_first_64_kib(audio):
@@ -101,6 +118,9 @@ def test_mutated_and_cross_format_inputs_never_raise_or_claim_too_much(audio):
             data = mutate(data)
         for reader in (ext, rng.choice(("mp3", "wav", "opus"))):
             seconds = audio_seconds(data, reader)
-            assert seconds is None or 0 < seconds <= len(data) * 8 / 4000, (reader, len(data), seconds)
+            # MP3/WAV: at least 4 kbit/s. Opus: no more than its packets' TOC bytes can claim (63 frames of
+            # 60 ms in a 2-byte packet, about 1.9 s per byte).
+            limit = len(data) * (1.9 if reader == "opus" else 8 / 4000)
+            assert seconds is None or 0 < seconds <= limit, (reader, len(data), seconds)
     for ext in ("mp3", "wav", "opus"):
         assert audio_seconds(b"", ext) is None and audio_seconds(b"\xff", ext) is None

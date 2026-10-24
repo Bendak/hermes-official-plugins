@@ -309,7 +309,7 @@ def test_the_card_line_is_for_the_call_the_desktop_saw_in_that_chat(desktop, api
     see()
     assert "desktop_card" not in desktop({"prompt": "Rain on a tin roof", "duration_seconds": 2})  # other prompt
     # Another chat repeating the prompt (a CLI or TUI session, a second Desktop chat) is not the call seen.
-    assert "desktop_card" not in desktop({"prompt": prompt}, session="cli-session-B", source="cli")
+    assert "desktop_card" not in desktop({"prompt": prompt}, session="cli-session-B", source="local")
     assert "desktop_card" not in desktop({"prompt": prompt}, session="desk-2")
     assert "desktop_card" in desktop({"prompt": prompt})  # the chat it was seen in still gets it
 
@@ -342,20 +342,27 @@ def test_a_sighting_that_names_no_chat_vouches_for_nothing(desktop, api):
     assert "desktop_card" not in desktop({"prompt": "glass tap"})
 
 
-def test_an_unknown_or_messaging_surface_never_gets_the_card_line(desktop, loaded, api):
-    """A Desktop open on the same profile hears a Telegram turn's tool events too and vouches for a
-    card; the Telegram user must still get the MEDIA: line only. Same when the turn's surface or
-    session cannot be told at all."""
+@pytest.mark.parametrize("platform", ["telegram", "discord", "api_server", "webhook", "msgraph_webhook", "kanban",
+                                      "codex", "gateway", "cli", "cron"])
+def test_only_a_desktop_turn_gets_the_card_line(desktop, api, platform):
+    """A Desktop with the session open hears the tool events of every turn on it, Telegram, api_server and
+    webhook turns included, and vouches for a card; those surfaces must still get the MEDIA: line only."""
+    _, client = api
+    client.post("/card-ready", json={"prompt": "door knock", "session": "desk-1"})
+    result = desktop({"prompt": "door knock"}, source="", platform=platform)
+    assert "desktop_card" not in result and result["media_tag"].startswith("MEDIA:")
+    assert "desktop_card" not in desktop({"prompt": "door knock"}, source="desktop", platform=platform)
+    assert "desktop_card" in desktop({"prompt": "door knock"}, source="", platform="local")  # the Desktop turn
+
+
+def test_an_unknown_surface_or_session_never_gets_the_card_line(desktop, loaded, api):
     _, call = loaded
     _, client = api
-    see = lambda session="desk-1": client.post("/card-ready", json={"prompt": "door knock", "session": session})
-    see()
-    result = desktop({"prompt": "door knock"}, source="", platform="telegram")
-    assert "desktop_card" not in result and result["media_tag"].startswith("MEDIA:")
+    client.post("/card-ready", json={"prompt": "door knock", "session": "desk-1"})
     assert "desktop_card" not in desktop({"prompt": "door knock"}, source="")  # no surface known
     assert "desktop_card" not in call({"prompt": "door knock"}, session_id="desk-1")  # no session context at all
     assert "desktop_card" not in desktop({"prompt": "door knock"}, session="")  # no session id
-    assert "desktop_card" in desktop({"prompt": "door knock"}, source="", platform="local")  # the Desktop turn
+    assert "desktop_card" in desktop({"prompt": "door knock"}, source="tui")  # a 0.22.x Desktop backend turn
 
 
 def test_inside_the_plugin_host_the_card_line_is_never_offered(desktop, api, monkeypatch):

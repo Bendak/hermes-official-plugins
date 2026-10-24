@@ -119,4 +119,4 @@ def opus_bytes(samples: int, pre_skip: int = 312, offset: int = 0) -> bytes:
 
 @pytest.fixture
 def audio():
-    return SimpleNamespace(wav=wav_bytes, mp3=mp3_bytes, opus=opus_bytes)
+    return SimpleNamespace(wav=wav_bytes, mp3=mp3_bytes, opus=opus_bytes, page=ogg_page)

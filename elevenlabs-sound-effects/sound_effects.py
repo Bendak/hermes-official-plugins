@@ -268,22 +268,29 @@ def _download(base_url: str, output_format: str, body: dict, api_key: str):
     return outcome["value"]
 
 
+# Surfaces whose turns a Desktop window draws: Desktop's own turns (``local`` on current hosts, ``desktop``
+# or ``tui`` on 0.22.x backends). Every other surface (messaging apps, api_server, webhooks, cron, kanban,
+# ...) gets the MEDIA: line even when a Desktop has its session open.
+_CARD_SURFACES = frozenset({"local", "desktop", "tui"})
+
+
 def _card_sessions(session_id: str) -> set[str]:
     """The ids a Desktop sighting may name for this call's chat, or an empty set when the card line must
-    not be offered. Empty unless the turn's surface is KNOWN and is not a messaging channel: a Desktop
-    open on the same profile hears a Telegram/Discord/Slack turn's tool events too, and would vouch for a
-    card nobody on that surface can render. Inside the plugin host process (``plugins.isolation: host``)
-    the caller's session context does not arrive, so the surface is unknown there and the answer is
-    always empty: the call delivers the ``MEDIA:`` line, which plays everywhere."""
+    not be offered. Empty unless every surface the turn names is a Desktop surface: a Desktop open on the
+    same session hears the tool events of a Telegram, api_server or webhook turn too, and would vouch for
+    a card nobody on that surface can render. Inside the plugin host process (``plugins.isolation:
+    host``) the caller's session context does not arrive, so the surface is unknown there and the answer
+    is always empty: the call delivers the ``MEDIA:`` line, which plays everywhere."""
     if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
         return set()
     try:
-        from gateway.session_context import get_session_env, session_is_messaging_surface
+        from gateway.session_context import get_session_env
     except ImportError:  # pragma: no cover - every supported host (>= 0.22.0) has it
         return set()
-    surface = (os.getenv("HERMES_PLATFORM") or "", get_session_env("HERMES_SESSION_PLATFORM", ""),
-               get_session_env("HERMES_SESSION_SOURCE", ""))
-    if not any(str(name or "").strip() for name in surface) or session_is_messaging_surface():
+    surface = {str(name or "").strip().lower() for name in (
+        os.getenv("HERMES_PLATFORM"), get_session_env("HERMES_SESSION_PLATFORM", ""),
+        get_session_env("HERMES_SESSION_SOURCE", ""))} - {""}
+    if not surface or not surface <= _CARD_SURFACES:
         return set()
     # The Desktop event names the chat by its durable id on current hosts and by its UI tab id on
     # 0.22.x; the tool knows both for its own turn.

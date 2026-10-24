@@ -170,8 +170,12 @@ def opus_seconds(data: bytes) -> float | None:
         return None
     pre_skip = struct.unpack_from("<H", data, head + 10)[0]
     first = last = None
+    carried = 0  # samples the audio packets really hold: a granule claiming more is corrupt
     for index, (granule, packets) in enumerate(_ogg_pages(data)):
-        if index < 2 or granule < 0:  # identification + comment headers; -1 = no packet ends here
+        if index < 2:  # identification + comment headers
+            continue
+        carried += sum(_opus_packet_samples(p) for p in packets)
+        if granule < 0:  # -1 = no packet ends on this page
             continue
         if first is None:
             first = granule - sum(_opus_packet_samples(p) for p in packets)
@@ -179,13 +183,16 @@ def opus_seconds(data: bytes) -> float | None:
     if first is None or last is None:
         return None
     samples = last - max(first, 0) - pre_skip
-    return samples / 48000 if samples > 0 else None  # Opus granules always count 48 kHz samples
+    if samples <= 0 or samples > carried:
+        return None
+    return samples / 48000  # Opus granules always count 48 kHz samples
 
 
 _READERS = {"mp3": mp3_seconds, "wav": wav_seconds, "opus": opus_seconds}
-# No file in these formats carries audio below ~6 kbit/s (Opus' floor; MP3 starts at 8, PCM far above),
-# so a length the byte count cannot hold at 4 kbit/s comes from a corrupt header or granule.
-_MIN_BITS_PER_SECOND = 4000
+# MP3 frames start at 8 kbit/s and PCM is far above, so an MP3 or WAV length the byte count cannot hold at
+# 4 kbit/s comes from a corrupt header. Opus is checked against the samples its packets carry instead
+# (libopus codes digital silence at under 2 kbit/s).
+_MIN_BITS_PER_SECOND = {"mp3": 4000, "wav": 4000}
 
 
 def audio_seconds(data: bytes, extension: str) -> float | None:
@@ -195,6 +202,7 @@ def audio_seconds(data: bytes, extension: str) -> float | None:
         seconds = reader(data) if reader else None
     except (struct.error, IndexError, KeyError, ZeroDivisionError):
         seconds = None
-    if not seconds or seconds <= 0 or seconds > len(data) * 8 / _MIN_BITS_PER_SECOND:
+    floor = _MIN_BITS_PER_SECOND.get(extension)
+    if not seconds or seconds <= 0 or (floor and seconds > len(data) * 8 / floor):
         return None
     return round(seconds, 3)
