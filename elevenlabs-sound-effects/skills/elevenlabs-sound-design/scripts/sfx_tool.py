@@ -21,6 +21,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import unicodedata
 import zipfile
 from pathlib import Path
 
@@ -30,6 +31,9 @@ FORMAT_EXT = {"ogg": ".ogg", "wav": ".wav", "mp3": ".mp3"}
 _TIMEOUT = 300
 _MAX_PCM_BYTES = 64 * 1024 * 1024
 _LOOP_RATE = 48000
+_SILENT_PEAK = 10  # int16 peak at or below about -70 dBFS: (near-)digital silence
+AUDIO_EXT = {".wav", ".ogg", ".mp3", ".opus", ".flac", ".m4a", ".aac", ".aiff", ".aif", ".webm", ".mka"}
+_LOUDNESS_CEILING_DBTP = -1.5
 
 
 class Failure(Exception):
@@ -93,11 +97,36 @@ def probe(path: Path, ffprobe: str) -> dict:
     if not audio:
         raise Failure("bad_input", f"{path.name} has no audio stream")
     fmt = data.get("format", {})
-    duration = fmt.get("duration")
-    return {"file": str(path), "duration_seconds": round(float(duration), 3) if duration else None,
+    duration = float(fmt["duration"]) if fmt.get("duration") else None
+    if audio.get("codec_name") == "opus":
+        duration = _opus_seconds(path, ffprobe) or duration
+    return {"file": str(path), "duration_seconds": round(duration, 3) if duration else None,
             "codec": audio.get("codec_name"), "sample_rate": int(audio.get("sample_rate") or 0) or None,
             "channels": audio.get("channels"), "container": fmt.get("format_name"),
             "bytes": path.stat().st_size}
+
+
+def _opus_seconds(path: Path, ffprobe: str) -> float:
+    # Ogg Opus container durations include the encoder pre-skip (and ffprobe's start_time is not reliable
+    # across muxers); the decoded frames are the length a player actually plays. Opus always decodes at 48 kHz.
+    proc = _run([ffprobe, "-v", "error", "-select_streams", "a:0", "-show_entries", "frame=nb_samples",
+                 "-of", "csv=p=0", str(path)])
+    counts = proc.stdout.decode("ascii", "replace").split()
+    return sum(int(c.strip(",")) for c in counts if c.strip(",").isdigit()) / 48000
+
+
+def measure_loudness(path: Path, ffmpeg: str) -> dict:
+    """Measured integrated loudness (EBU R128) and true peak of a file."""
+    proc = _run([ffmpeg, "-nostdin", "-hide_banner", "-nostats", "-i", str(path), "-vn",
+                 "-af", "ebur128=peak=true", "-f", "null", "-"])
+    text = proc.stderr.decode("utf-8", "replace")
+
+    def last(pattern: str) -> float | None:
+        found = re.findall(pattern, text)
+        return float(found[-1]) if found and found[-1] != "-inf" else None
+
+    return {"integrated_lufs": last(r"\bI:\s+(-?[\d.]+|-inf) LUFS"),
+            "true_peak_dbtp": last(r"Peak:\s+(-?[\d.]+|-inf) dBFS")}
 
 
 def _filters(trim: bool, loudness: float | None, fade_ms: float) -> list[str]:
@@ -106,7 +135,7 @@ def _filters(trim: bool, loudness: float | None, fade_ms: float) -> list[str]:
         edge = "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.01"
         chain += [edge, "areverse", edge, "areverse"]
     if loudness is not None:
-        chain.append(f"loudnorm=I={loudness:g}:TP=-1.5:LRA=11")
+        chain.append(f"loudnorm=I={loudness:g}:TP={_LOUDNESS_CEILING_DBTP:g}:LRA=11")
     if fade_ms > 0:
         d = fade_ms / 1000
         chain += [f"afade=t=in:d={d:g}", "areverse", f"afade=t=in:d={d:g}", "areverse"]
@@ -117,7 +146,29 @@ def cmd_probe(args) -> dict:
     return {"ok": True, **probe(_input(args.input), _tool("ffprobe", args.ffprobe))}
 
 
-def _encode(ffmpeg: str, src: Path, out: Path, chain: list[str], sample_rate: int | None) -> None:
+def _cannot_write(path: Path, exc: OSError) -> Failure:
+    return Failure("bad_args", f"cannot write {path}: {exc.strerror or exc}")
+
+
+def _temp_beside(out: Path, suffix: str) -> str:
+    # Write beside the target and rename, so a failed run never leaves a half-written file at OUT.
+    try:
+        fd, tmp = tempfile.mkstemp(prefix=".sfx_tool_", suffix=suffix, dir=out.parent)
+    except OSError as exc:  # a read-only folder: name OUT, not the hidden temp file
+        raise _cannot_write(out, exc) from None
+    os.close(fd)
+    return tmp
+
+
+def _publish(tmp: str, out: Path) -> None:
+    try:
+        os.replace(tmp, out)
+    except OSError as exc:
+        raise _cannot_write(out, exc) from None
+
+
+def _encode(ffmpeg: str, src: Path, out: Path, chain: list[str], sample_rate: int | None, check=None) -> None:
+    """Encode SRC to OUT; ``check(tmp_path)`` may refuse the encoded result before it replaces OUT."""
     cmd = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-i", str(src), "-vn"]
     if chain:
         cmd += ["-af", ",".join(chain)]
@@ -125,12 +176,12 @@ def _encode(ffmpeg: str, src: Path, out: Path, chain: list[str], sample_rate: in
         # libopus takes only 48/24/16/12/8 kHz.
         cmd += ["-ar", "48000" if out.suffix.lower() == ".opus" else str(sample_rate)]
     cmd += CODECS[out.suffix.lower()]
-    # Write beside the target and rename, so a failed run never leaves a half-written file at OUT.
-    fd, tmp = tempfile.mkstemp(prefix=".sfx_tool_", suffix=out.suffix, dir=out.parent)
-    os.close(fd)
+    tmp = _temp_beside(out, out.suffix)
     try:
         _run(cmd + [tmp])
-        os.replace(tmp, out)
+        if check:
+            check(Path(tmp))
+        _publish(tmp, out)
     finally:
         if os.path.exists(tmp):
             os.unlink(tmp)
@@ -143,6 +194,8 @@ def _output(path: str, src: Path, force: bool) -> Path:
     if not out.parent.is_dir():
         raise Failure("bad_args", f"output folder does not exist: {out.parent}")
     out = out.resolve()
+    if out.is_dir():
+        raise Failure("bad_args", f"{out} is a folder; give a file name for the output")
     if out == src:
         raise Failure("bad_args", "output must differ from the input (the input is never overwritten)")
     if out.exists() and not force:
@@ -160,10 +213,35 @@ def cmd_process(args) -> dict:
         raise Failure("bad_args", "--fade-ms must be between 0 and 5000")
     before = probe(src, ffprobe)
     chain = _filters(args.trim, args.loudness, args.fade_ms)
-    _encode(ffmpeg, src, out, chain, before["sample_rate"] if args.loudness is not None else None)
-    after = probe(out, ffprobe)
-    return {"ok": True, "input": before, "output": after,
-            "applied": {"trim_silence": args.trim, "loudness_lufs": args.loudness, "fade_ms": args.fade_ms}}
+    check = _fade_fits(ffprobe, args.fade_ms, args.trim) if args.fade_ms > 0 else None
+    _encode(ffmpeg, src, out, chain, before["sample_rate"] if args.loudness is not None else None, check)
+    after = {**probe(out, ffprobe), **measure_loudness(out, ffmpeg)}
+    applied = {"trim_silence": args.trim, "loudness_target_lufs": args.loudness, "fade_ms": args.fade_ms}
+    note = _loudness_note(args.loudness, after)
+    if note:
+        applied["loudness_note"] = note
+    return {"ok": True, "input": before, "output": after, "applied": applied}
+
+
+def _fade_fits(ffprobe: str, fade_ms: float, trimmed: bool):
+    def check(encoded: Path) -> None:
+        # Measured on the encoded result, so a --trim that shortened the clip counts.
+        length = probe(encoded, ffprobe)["duration_seconds"] or 0.0
+        if 2 * fade_ms / 1000 >= length:
+            where = " after trimming" if trimmed else ""
+            raise Failure("bad_args", f"--fade-ms {fade_ms:g} fades in and out over {2 * fade_ms / 1000:g} s, but the "
+                                      f"clip is {length:g} s long{where}; use a fade shorter than half the clip")
+    return check
+
+
+def _loudness_note(target: float | None, measured: dict) -> str | None:
+    got, peak = measured.get("integrated_lufs"), measured.get("true_peak_dbtp")
+    if target is None or got is None or abs(got - target) <= 1.0:
+        return None
+    held = got < target and peak is not None and peak >= _LOUDNESS_CEILING_DBTP - 0.5
+    why = (f"the {_LOUDNESS_CEILING_DBTP:g} dBTP true-peak ceiling held it down" if held
+           else "loudnorm could not reach it on this material (too short, too peaky or too uneven)")
+    return f"aimed at {target:g} LUFS, measured {got:g} LUFS: {why}"
 
 
 def _pcm_frames(ffmpeg: str, src: Path, channels: int, rate: int, *, whole: bool = False) -> array.array:
@@ -181,7 +259,8 @@ def _pcm_frames(ffmpeg: str, src: Path, channels: int, rate: int, *, whole: bool
 
 def cmd_loopfix(args) -> dict:
     """Crossfade the loop's last N ms into its first N ms (equal-power) and drop that tail: playback
-    then runs from the blended start straight out of the original audio, with no dip or gap."""
+    then runs from the blended start straight out of the original audio, with no gap. The gain follows the
+    segments' correlation; an anti-correlated seam can still dip a few dB (``crossfade_level_db``)."""
     src = _input(args.input)
     ffmpeg, ffprobe = _tool("ffmpeg", args.ffmpeg), _tool("ffprobe", args.ffprobe)
     out = _output(args.out, src, args.force)
@@ -199,74 +278,114 @@ def cmd_loopfix(args) -> dict:
     keep = frames - n
     head = samples[: n * channels]
     tail = samples[keep * channels: (keep + n) * channels]
-    # Equal-power fades sum to sqrt(2) on correlated material (a hum, a tone): normalise the gain by the
-    # segments' correlation so the seam neither bumps nor dips, whatever the material.
+    head_power, tail_power = sum(a * a for a in head), sum(b * b for b in tail)
     dot = sum(a * b for a, b in zip(head, tail))
-    norm = math.sqrt(sum(a * a for a in head) * sum(b * b for b in tail)) or 1.0
-    r = max(-1.0, min(1.0, dot / norm))
+    r = max(-1.0, min(1.0, dot / (math.sqrt(head_power * tail_power) or 1.0)))
     blended = array.array("h", samples[: keep * channels])
-    clipped = 0
-    for i in range(n):
-        t = (i + 0.5) / n
-        fade_in, fade_out = math.sin(t * math.pi / 2), math.cos(t * math.pi / 2)
-        # Capped: anti-correlated segments cancel, and boosting what is left would only add noise.
-        gain = min(1.5, 1 / math.sqrt(max(1e-6, fade_in ** 2 + fade_out ** 2 + 2 * r * fade_in * fade_out)))
-        for c in range(channels):
-            v = (head[i * channels + c] * fade_in + tail[i * channels + c] * fade_out) * gain
-            if not -32768 <= v <= 32767:
-                clipped += 1
-            blended[i * channels + c] = max(-32768, min(32767, int(round(v))))
+    clipped = _blend(blended, head, tail, channels, r)
+    # Anti-correlated segments (r well below 0) partly cancel; the gain cap leaves a dip inside the blend.
+    fade_db = _crossfade_dip_db(blended, head, tail, channels)
     if sys.byteorder == "big":
         blended.byteswap()
-    fd, raw_path = tempfile.mkstemp(prefix=".sfx_tool_", suffix=".pcm", dir=out.parent)
-    with os.fdopen(fd, "wb") as handle:
-        handle.write(blended.tobytes())
+    raw_path = _temp_beside(out, ".pcm")
     try:
+        Path(raw_path).write_bytes(blended.tobytes())
         raw_src = [ffmpeg, "-nostdin", "-hide_banner", "-loglevel", "error", "-y", "-f", "s16le",
                    "-ar", str(rate), "-ac", str(channels), "-i", raw_path]
-        tmp_fd, tmp = tempfile.mkstemp(prefix=".sfx_tool_", suffix=out.suffix, dir=out.parent)
-        os.close(tmp_fd)
+        tmp = _temp_beside(out, out.suffix)
         try:
             _run(raw_src + CODECS[out.suffix.lower()] + [tmp])
-            os.replace(tmp, out)
+            _publish(tmp, out)
         finally:
             if os.path.exists(tmp):
                 os.unlink(tmp)
     finally:
         os.unlink(raw_path)
     return {"ok": True, "input": before, "output": probe(out, ffprobe), "crossfade_ms": args.crossfade_ms,
-            "seam_correlation": round(r, 3), "clipped_samples": clipped}
+            "seam_correlation": round(r, 3), "crossfade_level_db": round(fade_db, 1), "clipped_samples": clipped}
 
 
-def cmd_loopcheck(args) -> dict:
-    src = _input(args.input)
-    samples = _pcm_frames(_tool("ffmpeg", args.ffmpeg), src, 1, _LOOP_RATE)
-    if len(samples) < _LOOP_RATE // 20:
-        raise Failure("bad_input", f"{src.name} is shorter than 50 ms; nothing to loop")
+def _crossfade_dip_db(blended: array.array, head: array.array, tail: array.array, channels: int) -> float:
+    """Worst level of the blend against the audio it replaced, over quarters of the crossfade (dB, <= 0)."""
+    step = max(channels, len(head) // 4 // channels * channels)
+    worst = 0.0
+    for at in range(0, len(head) - step + 1, step):
+        power = sum(v * v for v in blended[at: at + step])
+        reference = (sum(v * v for v in head[at: at + step]) + sum(v * v for v in tail[at: at + step])) / 2
+        if reference > step * 10 ** 2:  # skip near-silence, where any ratio is noise
+            worst = min(worst, 10 * math.log10(max(power, 1) / reference))
+    return worst
+
+
+def _blend(blended: array.array, head: array.array, tail: array.array, channels: int, r: float) -> int:
+    """Equal-power crossfade of TAIL into HEAD, written over the start of BLENDED; returns clipped samples."""
+    n = len(head) // channels
+    clipped = 0
+    for i in range(n):
+        t = (i + 0.5) / n
+        fade_in, fade_out = math.sin(t * math.pi / 2), math.cos(t * math.pi / 2)
+        # Equal-power fades sum to sqrt(2) on correlated material (a hum, a tone): normalise the gain by
+        # the segments' correlation. Capped: anti-correlated segments cancel, and boosting what is left
+        # would only add noise.
+        gain = min(1.5, 1 / math.sqrt(max(1e-6, fade_in ** 2 + fade_out ** 2 + 2 * r * fade_in * fade_out)))
+        for c in range(channels):
+            v = (head[i * channels + c] * fade_in + tail[i * channels + c] * fade_out) * gain
+            if not -32768 <= v <= 32767:
+                clipped += 1
+            blended[i * channels + c] = max(-32768, min(32767, int(round(v))))
+    return clipped
+
+
+def _rms(chunk) -> float:
+    return math.sqrt(sum(v * v for v in chunk) / max(1, len(chunk))) / 32768.0
+
+
+def _seam(ch: array.array) -> dict:
+    """Seam statistics for ONE channel (a mono mix would cancel anti-phase clicks)."""
     scale = 32768.0
-    diffs = sorted(abs(samples[i + 1] - samples[i]) for i in range(0, len(samples) - 1, 7))
+    diffs = sorted(abs(ch[i + 1] - ch[i]) for i in range(0, len(ch) - 1, 7))
     typical = diffs[int(len(diffs) * 0.99)] / scale
-    seam = abs(samples[0] - samples[-1]) / scale
-    edge = _LOOP_RATE // 100  # 10 ms either side of the seam
-
-    def rms(chunk) -> float:
-        return math.sqrt(sum(s * s for s in chunk) / max(1, len(chunk))) / scale
-
-    head, tail = rms(samples[:edge]), rms(samples[-edge:])
+    jump = abs(ch[0] - ch[-1]) / scale
+    edge, ms = _LOOP_RATE // 100, _LOOP_RATE // 1000  # 10 ms and 1 ms either side of the seam
+    head, tail = _rms(ch[:edge]), _rms(ch[-edge:])
     level_db = 20 * math.log10(max(head, 1e-6) / max(tail, 1e-6))
     # A level dip at the seam is either a fade (a dropout on every repeat) or a loop cut inside a rest
     # (fine): the samples can't tell them apart, so it is reported as a measurement with a note, never
     # as a verdict that would send anyone to regenerate a good loop.
-    ms = _LOOP_RATE // 1000
-    seam_level = rms(samples[-ms:].tolist() + samples[:ms].tolist())
-    around = rms(samples[-200 * ms:].tolist() + samples[:200 * ms].tolist())
+    seam_level = _rms(ch[-ms:].tolist() + ch[:ms].tolist())
+    around = _rms(ch[-200 * ms:].tolist() + ch[:200 * ms].tolist())
     dip_db = 20 * math.log10(max(seam_level, 1e-6) / max(around, 1e-6)) if around > 0.005 else 0.0
-    click = seam > max(2 * typical, 0.02) or abs(level_db) > 6
-    verdict = "click" if click else "seamless"
-    result = {"ok": True, "file": str(src), "verdict": verdict,
-              "seam_jump": round(seam, 4), "typical_step_p99": round(typical, 4),
-              "edge_level_difference_db": round(level_db, 1), "seam_dip_db": round(dip_db, 1),
-              "duration_seconds": round(len(samples) / _LOOP_RATE, 3)}
+    # Out of a silent tail, a louder head is a sound starting (an onset), not a discontinuity: only
+    # the sample jump can make that a click. A loud tail into a quiet head is a sound cut off.
+    onset = level_db > 0 and tail < 0.001
+    # 12 dB, not less: per channel, a hum's level swings a few dB within 10 ms (an anti-correlated
+    # crossfade dips there too), and that is not a click.
+    click = jump > max(2 * typical, 0.02) or (abs(level_db) > 12 and not onset)
+    return {"click": click, "seam_jump": jump, "typical_step_p99": typical, "edge_level_difference_db": level_db,
+            "seam_dip_db": dip_db}
+
+
+def cmd_loopcheck(args) -> dict:
+    src = _input(args.input)
+    ffmpeg, ffprobe = _tool("ffmpeg", args.ffmpeg), _tool("ffprobe", args.ffprobe)
+    channels = max(1, min(8, int(probe(src, ffprobe)["channels"] or 1)))
+    samples = _pcm_frames(ffmpeg, src, channels, _LOOP_RATE)
+    frames = len(samples) // channels
+    if frames < _LOOP_RATE // 20:
+        raise Failure("bad_input", f"{src.name} is shorter than 50 ms; nothing to loop")
+    result = {"ok": True, "file": str(src), "verdict": "silent", "channels_checked": channels,
+              "duration_seconds": round(frames / _LOOP_RATE, 3)}
+    live = [(c, ch) for c, ch in ((c, samples[c::channels]) for c in range(channels))
+            if max(max(ch), -min(ch)) > _SILENT_PEAK]
+    if not live:
+        result["note"] = "the file is (near-)digital silence; there is no seam to judge"
+        return result
+    stats = [(c, _seam(ch)) for c, ch in live]
+    worst_c, worst = max(stats, key=lambda cs: (cs[1]["click"], cs[1]["seam_jump"] / max(cs[1]["typical_step_p99"], 1e-3)))
+    dip_db = min(st["seam_dip_db"] for _, st in stats)
+    result.update(verdict="click" if worst["click"] else "seamless", worst_channel=worst_c,
+                  seam_jump=round(worst["seam_jump"], 4), typical_step_p99=round(worst["typical_step_p99"], 4),
+                  edge_level_difference_db=round(worst["edge_level_difference_db"], 1), seam_dip_db=round(dip_db, 1))
     if dip_db < -20:
         result["dip_note"] = ("the level drops sharply at the seam: a fade there is a dropout on every repeat, "
                               "a cut inside a rest is fine; listen before changing it")
@@ -277,7 +396,25 @@ def cmd_loopcheck(args) -> dict:
 
 
 def _slug(text: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", text.lower()).strip("-")[:48]
+    ascii_text = unicodedata.normalize("NFKD", text).encode("ascii", "ignore").decode("ascii")  # ünï -> uni
+    return re.sub(r"[^a-z0-9]+", "-", ascii_text.lower()).strip("-")[:48]
+
+
+def _pack_ext(info: dict, src: Path, fmt: str | None) -> str:
+    if fmt:
+        return FORMAT_EXT[fmt]
+    if src.suffix.lower() in AUDIO_EXT:
+        return src.suffix.lower()
+    if info["codec"] == "opus":
+        return ".opus"
+    container = (info["container"] or "").split(",")[0]  # extensionless source: name it by what it is
+    return {"mov": ".m4a", "matroska": ".mka", "aac": ".aac"}.get(container, f".{container}" if container else ".bin")
+
+
+def _pack_stem(src: Path) -> str:
+    stem = src.stem if src.suffix.lower() in AUDIO_EXT else src.name
+    stem = re.sub(r"^sfx_|_\d{8}_\d{6}_[0-9a-f]+$", "", stem)
+    return _slug(re.sub(r"^\d{2}-", "", stem)) or "sound"  # re-packing a pack's own 01-x files keeps x
 
 
 def cmd_pack(args) -> dict:
@@ -308,7 +445,10 @@ def cmd_pack(args) -> dict:
         raise Failure("bad_args", f"{zip_path} is a folder; move it away first")
     umask = os.umask(0)
     os.umask(umask)
-    staging = Path(tempfile.mkdtemp(prefix=f".{name}.staging-", dir=out_dir))
+    try:
+        staging = Path(tempfile.mkdtemp(prefix=f".{name}.staging-", dir=out_dir))
+    except OSError as exc:  # a read-only --out-dir
+        raise _cannot_write(out_dir, exc) from None
     tmp_zip = None
     try:
         entries = _fill_pack(staging, sources, prompts, args, ffmpeg, ffprobe)
@@ -358,9 +498,8 @@ def cmd_pack(args) -> dict:
 def _fill_pack(folder: Path, sources: list[Path], prompts: dict, args, ffmpeg: str | None, ffprobe: str) -> list[dict]:
     entries, used = [], set()
     for index, src in enumerate(sources, 1):
-        ext = FORMAT_EXT[args.format] if args.format else src.suffix.lower()
-        stem = _slug(re.sub(r"^sfx_|_\d{8}_\d{6}_[0-9a-f]+$", "", src.stem)) or "sound"
-        target = folder / f"{index:02d}-{stem}{ext}"
+        ext = _pack_ext(probe(src, ffprobe), src, args.format)  # probe the source: errors name it, not staging
+        target = folder / f"{index:02d}-{_pack_stem(src)}{ext}"
         while target.name in used:
             target = target.with_name(f"{target.stem}-x{ext}")
         used.add(target.name)

@@ -68,10 +68,11 @@ Keep one sound per call. For a set, make one call per sound with a consistent st
   `duration_seconds` = bar length + crossfade (e.g. 2.687 s for one 90 BPM bar and a 20 ms crossfade)
   so the fixed loop lands exactly on the bar.
 - Verify the seam before calling it seamless: run `loopcheck` (below) on the file you deliver and report
-  its verdict (`seamless` or `click`). When it adds a `dip_note`, pass that on as a thing to listen
-  for; it is not a failure and never a reason to regenerate on its own.
-- A loop flagged `click`: run `loopfix` (crossfades the end into the start, 20 ms by default), then
-  `loopcheck` the result. Never "fix" a loop with `process --fade-ms`: fades dip to silence at every
+  its verdict (`seamless`, `click`, or `silent` for a file with nothing audible in it). When it adds a
+  `dip_note`, pass that on as a thing to listen for; it is not a failure and never a reason to
+  regenerate on its own.
+- A loop flagged `click`: run `loopfix` (crossfades the end into the start, 20 ms by default; it reduces
+  the seam jump), then `loopcheck` the result and report `loopfix`'s `crossfade_level_db`. Never "fix" a loop with `process --fade-ms`: fades dip to silence at every
   repeat.
 - Never pass `--trim` or `--fade-ms` to `process` for a loop; plain conversion keeps the edges.
 - Lossy OGG/MP3 can add a small edge artifact a WAV does not have: if the converted file checks
@@ -93,8 +94,10 @@ engine; convert loops to OGG or WAV.
 
 `scripts/sfx_tool.py` (stdlib Python + ffmpeg/ffprobe). Every run prints exactly one JSON line,
 `{"ok": true, ...}` or `{"ok": false, "error": "...", "code": "..."}`, and exits 0 or 1; read that
-line, never guess. Codes: `ffmpeg_missing`, `bad_input`, `bad_args`, `ffmpeg_failed`.
-Run it with `terminal`:
+line, never guess. Codes: `ffmpeg_missing` (install ffmpeg), `bad_input` (input missing, not audio,
+too short or too long), `bad_args` (a bad option, or an output that can't be written: the error names
+it), `ffmpeg_failed`, `interrupted` (stopped by Ctrl-C), `internal` (a bug in the script; report it).
+Run it with `terminal` (use `python` if `python3` is missing, as on Windows):
 
 ```
 python3 "${HERMES_SKILL_DIR}/scripts/sfx_tool.py" probe IN
@@ -104,20 +107,31 @@ python3 "${HERMES_SKILL_DIR}/scripts/sfx_tool.py" loopcheck IN
 python3 "${HERMES_SKILL_DIR}/scripts/sfx_tool.py" pack --name NAME --out-dir DIR FILE [FILE ...] [--format ogg|wav|mp3] [--prompts prompts.json]
 ```
 
+A file name that starts with `-` reads as an option: pass it as `./-name.mp3` (or put `--` before
+the file names).
+
 - `process`: converts to the format implied by `OUT`'s extension (`.ogg` Vorbis, `.wav` 16-bit PCM,
   `.mp3`, `.opus`). Options for one-shots: `--trim` removes leading/trailing silence, `--loudness`
-  normalises to that many LUFS (EBU R128; -16 for chat/web, -23 for broadcast video, -14 to -18 for
-  games), `--fade-ms` adds in/out fades. Without options it only converts. It never overwrites its input.
+  aims at that many LUFS (EBU R128; -16 for chat/web, -23 for broadcast video, -14 to -18 for games),
+  capped by a -1.5 dBTP true-peak ceiling, `--fade-ms` adds in/out fades (refused when the two fades
+  would cover the whole clip). Without options it only converts. It never overwrites its input. Its
+  JSON `output` carries the measured `integrated_lufs` and `true_peak_dbtp`: report the measured
+  loudness, not the target (`applied.loudness_note` says when they differ by more than 1 LU).
 - `loopfix`: crossfade of the loop's last N ms into its first N ms, gain-matched to how alike the two
-  segments are; the result is N ms shorter and repeats without a click or a dip. Its JSON reports
-  `clipped_samples` (should be 0).
-- `loopcheck`: verdict `seamless` or `click` (the last and first samples jump), plus `seam_dip_db` and,
-  when the level drops sharply at the seam, a `dip_note` (a fade or a cut inside a rest; the samples
-  can't tell which). Report what it measured.
-- `pack`: copies (and converts with `--format`) the files into `DIR/NAME/` with tidy names, writes
-  `manifest.json` (file, duration, sample rate, channels, format, and the prompt for each file when
-  `--prompts` maps file names to prompts) and `DIR/NAME.zip`. `--force` replaces an earlier pack of
-  the same name completely.
+  segments are (`seam_correlation`); the result is N ms shorter and its seam jump is gone. An
+  anti-correlated seam (`seam_correlation` well below 0) or an attack inside the first N ms can leave
+  a dip inside the crossfade: `crossfade_level_db` measures it (near 0 is clean; a few dB below is
+  audible on a steady hum). It also reports `clipped_samples` (should be 0).
+- `loopcheck`: checks every channel and reports the worst: verdict `seamless`, `click` (the last and
+  first samples jump, or a sound is cut off at the seam), or `silent` (nothing above about -70 dBFS),
+  plus `seam_dip_db` and, when the level drops sharply at the seam, a `dip_note` (a fade or a cut
+  inside a rest; the samples can't tell which). A sound starting just after a silent seam is an
+  onset, not a click. Report what it measured.
+- `pack`: copies (and converts with `--format`) the files into `DIR/NAME/` with tidy ASCII names
+  (`01-name.ext`; a file without an extension gets the one its contents imply), writes
+  `manifest.json` (file, source, duration, sample rate, channels, codec, and the prompt for each file
+  when `--prompts` maps file names to prompts) and `DIR/NAME.zip`. `--force` replaces an earlier pack
+  of the same name completely.
 
 ## Procedure
 

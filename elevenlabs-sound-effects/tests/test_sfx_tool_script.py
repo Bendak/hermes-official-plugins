@@ -177,3 +177,111 @@ def test_pack_writes_folder_manifest_and_zip(tmp_path):
         os.umask(umask)
         assert (out_dir / "ui-pack").stat().st_mode & 0o777 == 0o777 & ~umask
         assert (out_dir / "ui-pack.zip").stat().st_mode & 0o777 == 0o666 & ~umask
+
+
+def write_wav(path: Path, channels: list[list[float]], rate: int = 48000) -> Path:
+    """Interleave per-channel float samples (int16 scale) into a 16-bit WAV."""
+    with wave.open(str(path), "wb") as out:
+        out.setnchannels(len(channels))
+        out.setsampwidth(2)
+        out.setframerate(rate)
+        out.writeframes(b"".join(struct.pack("<h", max(-32767, min(32767, int(v))))
+                                 for frame in zip(*channels) for v in frame))
+    return path
+
+
+@needs_ffmpeg
+def test_an_unwritable_output_names_out_not_a_hidden_temp_file(tmp_path):
+    src = tone(tmp_path / "a.wav", 0.3, 440)
+    (tmp_path / "d.wav").mkdir()
+    code, out = run("process", str(src), "--out", str(tmp_path / "d.wav"), "--force")
+    assert code == 1 and out["code"] == "bad_args" and "d.wav" in out["error"] and ".sfx_tool_" not in out["error"]
+    if os.name != "posix" or os.geteuid() == 0:
+        return
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o555)
+    try:
+        for args in (("process", str(src), "--out", str(locked / "x.wav")),
+                     ("loopfix", str(src), "--out", str(locked / "x.wav")),
+                     ("pack", str(src), "--name", "p", "--out-dir", str(locked))):
+            code, out = run(*args)
+            assert code == 1 and out["code"] == "bad_args" and str(locked) in out["error"], args
+            assert ".sfx_tool_" not in out["error"] and "staging" not in out["error"]
+    finally:
+        locked.chmod(0o755)
+
+
+@needs_ffmpeg
+def test_process_reports_the_loudness_it_measured_not_the_target(tmp_path):
+    steady = run("process", str(tone(tmp_path / "t.wav", 2.0, 440)), "--out", str(tmp_path / "t.ogg"), "--loudness", "-16")[1]
+    assert abs(steady["output"]["integrated_lufs"] + 16) <= 1 and steady["output"]["true_peak_dbtp"] <= -1.4
+    assert steady["applied"]["loudness_target_lufs"] == -16 and "loudness_note" not in steady["applied"]
+    # A quiet tone under sharp clicks: loudnorm can't reach -16 here, and the JSON must say so.
+    rate = 48000
+    quiet = [300 * math.sin(2 * math.pi * 440 * i / rate) + (30000 * (-1) ** i if i % (rate // 2) < 48 else 0)
+             for i in range(2 * rate)]
+    peaky = run("process", str(write_wav(tmp_path / "p.wav", [quiet])), "--out", str(tmp_path / "p2.wav"),
+                "--loudness", "-16")[1]
+    assert peaky["output"]["integrated_lufs"] < -17 and "loudness_note" in peaky["applied"]
+
+
+@needs_ffmpeg
+def test_a_fade_longer_than_half_the_clip_is_refused(tmp_path):
+    src = tone(tmp_path / "two.wav", 2.0, 440)
+    code, out = run("process", str(src), "--out", str(tmp_path / "x.wav"), "--fade-ms", "1000")
+    assert code == 1 and out["code"] == "bad_args" and "2 s" in out["error"]
+    assert not (tmp_path / "x.wav").exists()
+    padded = tone(tmp_path / "padded.wav", 0.5, 440, pad=0.4)  # 1.3 s; 0.5 s once trimmed
+    assert run("process", str(padded), "--out", str(tmp_path / "y.wav"), "--fade-ms", "300")[0] == 0
+    code, out = run("process", str(padded), "--out", str(tmp_path / "z.wav"), "--fade-ms", "300", "--trim")
+    assert code == 1 and out["code"] == "bad_args" and "after trimming" in out["error"]
+
+
+@needs_ffmpeg
+def test_loopcheck_judges_every_channel_and_tells_silence_and_onsets_apart(tmp_path):
+    rate = 48000
+    # 480 Hz cut at a quarter cycle clicks; the right channel is its exact inverse, so a mono mix is silent.
+    left = [16000 * math.sin(2 * math.pi * 480 * i / rate) for i in range(rate + 25)]
+    anti = run("loopcheck", str(write_wav(tmp_path / "anti.wav", [left, [-v for v in left]])))[1]
+    assert anti["verdict"] == "click" and anti["channels_checked"] == 2
+    assert run("loopcheck", str(write_wav(tmp_path / "silent.wav", [[0.0] * rate] * 2)))[1]["verdict"] == "silent"
+    # A silent tail and a hit starting 3 ms after the seam: the sound begins, nothing is cut.
+    hit = [0.0 if i < 144 or i > rate // 2 else 20000 * math.sin(2 * math.pi * 200 * (i - 144) / rate)
+           * math.exp(-(i - 144) / 4000) for i in range(rate)]
+    assert run("loopcheck", str(write_wav(tmp_path / "hit.wav", [hit])))[1]["verdict"] == "seamless"
+
+
+@needs_ffmpeg
+def test_loopfix_measures_the_dip_an_anti_correlated_seam_leaves(tmp_path):
+    def sine(frames: int) -> Path:  # 480 Hz is 100 samples a cycle; the 20 ms tail starts at frames - 960
+        return write_wav(tmp_path / f"s{frames}.wav", [[16000 * math.sin(2 * math.pi * 480 * i / 48000)
+                                                        for i in range(frames)]])
+
+    out = run("loopfix", str(sine(48010)), "--out", str(tmp_path / "anti_fix.wav"))[1]  # tail half a cycle off
+    assert out["seam_correlation"] < -0.9 and out["crossfade_level_db"] < -3
+    matched = run("loopfix", str(sine(48060)), "--out", str(tmp_path / "in_fix.wav"))[1]  # tail in phase
+    assert matched["seam_correlation"] > 0.9 and matched["crossfade_level_db"] > -1
+
+
+@needs_ffmpeg
+def test_opus_duration_is_the_decoded_length(tmp_path):
+    out = run("process", str(tone(tmp_path / "one.wav", 1.0, 440)), "--out", str(tmp_path / "one.opus"))[1]
+    assert abs(out["output"]["duration_seconds"] - 1.0) <= 0.002  # not 1.0065: Opus pre-skip is not played
+
+
+@needs_ffmpeg
+def test_pack_names_extensionless_repacked_and_accented_sources(tmp_path):
+    src = tmp_path / "src"
+    src.mkdir()
+    accented = tone(src / "\u00fcn\u00ef snare.wav", 0.2, 440)
+    repacked = tone(src / "01-coin.wav", 0.2, 660)
+    bare = tone(src / "noext.wav", 0.2, 880).rename(src / "noext")
+    out_dir = tmp_path / "out"
+    out_dir.mkdir()
+    code, out = run("pack", str(accented), str(repacked), str(bare), "--name", "P", "--out-dir", str(out_dir))
+    assert code == 0 and [s["file"] for s in out["sounds"]] == ["01-uni-snare.wav", "02-coin.wav", "03-noext.wav"]
+    junk = src / "notaudio.wav"
+    junk.write_bytes(b"not audio at all")
+    code, out = run("pack", str(repacked), str(junk), "--name", "Q", "--out-dir", str(out_dir))
+    assert code == 1 and "notaudio.wav" in out["error"] and "staging" not in out["error"]

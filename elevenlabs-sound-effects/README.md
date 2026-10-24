@@ -122,18 +122,22 @@ sent.
 ## Local processing script
 
 The bundled skill runs `skills/elevenlabs-sound-design/scripts/sfx_tool.py` (Python standard library
-plus `ffmpeg`/`ffprobe` on PATH) when a sound needs processing:
+plus `ffmpeg`/`ffprobe` on PATH) when a sound needs processing (`python` instead of `python3` where
+only that exists, as on Windows):
 
 ```bash
 python3 sfx_tool.py process in.wav --out out.ogg --trim --loudness -16 --fade-ms 10   # one-shot: trim + normalise + fade + convert
 python3 sfx_tool.py process loop.mp3 --out loop.ogg                                   # plain conversion keeps a loop's edges
-python3 sfx_tool.py loopfix loop.wav --out fixed.wav                                  # crossfade the seam
-python3 sfx_tool.py loopcheck fixed.wav                                               # seamless | click (+ a note when the seam dips)
+python3 sfx_tool.py loopfix loop.wav --out fixed.wav                                  # crossfade the seam (+ crossfade_level_db)
+python3 sfx_tool.py loopcheck fixed.wav                                               # seamless | click | silent, worst channel (+ a note when the seam dips)
 python3 sfx_tool.py pack a.mp3 b.mp3 --name "UI pack" --out-dir . --format ogg # folder + manifest.json + zip
 ```
 
 Every run prints one JSON line (`{"ok": true, ...}` or `{"ok": false, "code": ..., "error": ...}`),
-including when ffmpeg is missing or an input is not audio.
+including when ffmpeg is missing, an input is not audio or an output can't be written. Codes:
+`ffmpeg_missing`, `bad_input`, `bad_args`, `ffmpeg_failed`, `interrupted`, `internal`. `process`
+reports the loudness it measured on the output (`output.integrated_lufs`, `output.true_peak_dbtp`):
+`--loudness` aims at the target under a -1.5 dBTP ceiling, so a peaky clip can land below it.
 
 ## Development
 
