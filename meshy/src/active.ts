@@ -15,8 +15,9 @@
  * fails (an outage on its route, a route that refuses it) is kept, shows its last row, and is retried on its own
  * backoff (3 s → 60 s) while the other tasks keep their pace. The whole poll backs off when the backend itself
  * fails, and stops on a permanent failure (a refused key) or after MAX_FAILURES in a row; the next Meshy tool call
- * re-arms it. Only tasks seen while the current profile/connection was in front are polled, and none tagged with
- * another one (ctx.rest reaches the front one, whose key does not own them); switching back resumes them.
+ * re-arms it. A task is polled only while the profile/connection that owns it is in front (ctx.rest reaches the front
+ * one, and another one's key does not own it): the event's tag says which, and an untagged event (the primary path)
+ * belongs to the one that was in front when it arrived. Switching back resumes them.
  *
  * Meshy tools sit behind tool search, so a call usually arrives as `tool_call` with `args.calls[].name =
  * mcp_meshy_*`, not as a top-level `mcp_meshy_*` name; both are recognised.
@@ -31,6 +32,7 @@ export interface ActiveTask {
   status: string
   progress: number
   prompt: string
+  created_at?: number
 }
 
 export interface ProgressState {
@@ -200,8 +202,9 @@ interface Watched {
   created: boolean
   since: number
   origin?: EventOrigin
-  /** scopeKey of the profile/connection in front when the task was seen: the one whose key owns it. */
-  scope: string
+  /** For an untagged event (the primary path), scopeKey of the profile/connection in front when it arrived: the
+   *  one whose key owns the task. A tagged event leaves it unset, and `foreign(origin)` decides from the tag. */
+  scope?: string
   /** Failed reads of this task in a row, and when to read it again. */
   fails: number
   retryAt: number
@@ -262,7 +265,7 @@ export function createProgressTracker(
       }
     }
     const front = scope()
-    return [...watched].filter(([, w]) => w.scope === front && !foreign(w.origin))
+    return [...watched].filter(([, w]) => (w.scope === undefined || w.scope === front) && !foreign(w.origin))
   }
 
   const schedule = (delay: number) => {
@@ -329,11 +332,16 @@ export function createProgressTracker(
             w.fails = 0
             w.retryAt = 0
           }
-          // A task this poll skipped or could not read keeps its last row until it is read again.
+          // A task that could not be read, now or while it waits out its backoff, keeps its last row until it is read
+          // again. Tasks past the newest MAX_WATCHED are not read and not shown, as before.
           const shown = new Set(fresh.map(t => t.task_id))
-          const front = new Set(pollable().map(([id]) => id))
-          const kept = state.tasks.filter(t => !shown.has(t.task_id) && front.has(t.task_id) && (failed.has(t.task_id) || !list.some(([id]) => id === t.task_id)))
-          set({ tasks: [...fresh, ...kept] })
+          const front = new Map(pollable())
+          const kept = state.tasks.filter(t => {
+            const w = front.get(t.task_id)
+            return !shown.has(t.task_id) && w !== undefined && (failed.has(t.task_id) || w.retryAt > now)
+          })
+          const newest = (t: ActiveTask) => (typeof t.created_at === 'number' ? t.created_at : 0)
+          set({ tasks: [...fresh, ...kept].sort((a, b) => newest(b) - newest(a)) })
         },
         (err: unknown) => {
           if (disposed || at !== generation) return
@@ -365,7 +373,7 @@ export function createProgressTracker(
         created: created || Boolean(known?.created),
         since: known?.since ?? clock.now(),
         origin,
-        scope: scope(),
+        scope: origin.profile || origin.connectionId ? undefined : scope(),
         fails: 0,
         retryAt: 0
       })

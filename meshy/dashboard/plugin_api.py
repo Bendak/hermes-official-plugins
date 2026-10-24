@@ -95,7 +95,7 @@ _MODEL_TYPES = ("text-to-3d", "image-to-3d", "multi-image-to-3d", "remesh", "ret
 _MODEL_ENDPOINTS = tuple((t, _TASK_ROUTES[t]) for t in _MODEL_TYPES)
 _IMAGE_ENDPOINTS = tuple((t, _TASK_ROUTES[t]) for t in ("text-to-image", "image-to-image"))
 # Meshy allows 20 requests/s per key: list and probe fan-outs share this many in-flight calls (_FANOUT_SLOTS),
-# and the progress chip's per-task reads get as many of their own (_ACTIVE_SLOTS), so at most 2 x _FANOUT run.
+# and the progress chip's per-task reads get as many slots of their own (_ACTIVE_SLOTS).
 _FANOUT = 4
 
 
@@ -688,6 +688,20 @@ def _owned(row: dict, route: str, task_id: str, key: str) -> tuple[dict, str]:
     return row, route
 
 
+def _whose_refusal(exc: HTTPException, route: str, task_id: str, key: str) -> HTTPException:
+    """A 403 on a task's known route: the key's or account's (_KeyRefused) when a generic route, which every plan
+    reads, refuses too; otherwise only this task's (its own route is plan-gated) and ``exc`` stands."""
+    generic = _TASK_ROUTES[_PROBE_FIRST[0]]
+    if route in (_TASK_ROUTES[t] for t in _PROBE_FIRST):
+        return _KeyRefused(status_code=403, detail=exc.detail)
+    try:
+        _task_at(generic, task_id, key)
+    except HTTPException as again:
+        if again.status_code == 403:
+            return again if isinstance(again, _KeyRefused) else _KeyRefused(status_code=403, detail=again.detail)
+    return exc
+
+
 def _task(task_id: str, key: str) -> dict:
     """The task record (signed ``model_urls`` / ``result`` / ``image_urls``) from the route that owns it."""
     if not _TASK_ID.fullmatch(task_id or ""):
@@ -697,7 +711,15 @@ def _task(task_id: str, key: str) -> dict:
         cached = _ROUTE_CACHE.get(slot)
         missed = _MISS_CACHE.get(slot, 0.0) > time.monotonic()
     if cached:
-        row = _task_at(cached, task_id, key)
+        try:
+            row = _task_at(cached, task_id, key)
+        except _KeyRefused:
+            raise
+        except HTTPException as exc:
+            refusal = exc if exc.status_code != 403 else _whose_refusal(exc, cached, task_id, key)
+            if refusal is exc:
+                raise
+            raise refusal from exc
         if row is not None:
             return row
         _remember(slot, None)  # deleted, or no longer this key's: probe again below
