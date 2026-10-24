@@ -172,7 +172,8 @@ real registry against a local stand-in for `POST /v1/sound-generation` that chec
 ElevenLabs' published OpenAPI schema; they never call ElevenLabs. `tests/test_library.py` reads the
 provenance records back through `dashboard/plugin_api.py`; `tests/test_sfx_tool_script.py` runs the
 script (its ffmpeg cases skip where ffmpeg is absent); `tests/sound.test.mjs` covers the card's Next
-actions.
+actions and helpers, and `tests/plugin.test.mjs` registers the real Desktop half against a stub SDK with
+and without Desktop's tool-media renderer area.
 
 The Desktop half is TypeScript in `src/`, bundled with esbuild into `desktop/plugin.js`, which is
 committed (Hermes Desktop loads it as is). It imports only `@hermes/plugin-sdk` and `react`;
