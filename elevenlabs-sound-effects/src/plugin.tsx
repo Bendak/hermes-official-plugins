@@ -2,8 +2,9 @@
  * ElevenLabs Sound Effects for Hermes Desktop.
  *
  * - `::elevenlabs-sfx{id="<sound_id>"}` renders an inline sound card in the transcript: waveform,
- *   play/pause, gapless loop audition, download per format, reveal, and Next actions. The bundled
- *   elevenlabs-sound-design skill tells the agent to emit it after each generation on Desktop.
+ *   play/pause, gapless loop audition, download per format, reveal, and Next actions. The tool offers
+ *   that line only after this half told the backend it saw the call start (`tool.start` → POST
+ *   card-ready); otherwise it offers a MEDIA: line, so a Desktop without this half still plays the sound.
  * - "ElevenLabs: open sound library" (⌘K) opens a workspace tab listing every sound this profile made,
  *   from the provenance record the tool writes per generation.
  *
@@ -16,10 +17,10 @@ import type { HermesPlugin, PaletteContribution, TranscriptDirectiveProps } from
 import { host, PALETTE_AREA, TRANSCRIPT_DIRECTIVE_AREA } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 
-import { player } from './audio.ts'
+import { clearSoundCache, currentScope, player } from './audio.ts'
 import { SoundCard } from './card.tsx'
 import { SoundLibrary } from './library.tsx'
-import { isSoundToolCall } from './sound.ts'
+import { isSoundToolCall, soundPrompts } from './sound.ts'
 
 const PLUGIN_ID = 'elevenlabs-sound-effects'
 const WORKSPACE_ID = 'elevenlabs-sound-library'
@@ -69,11 +70,23 @@ const plugin: HermesPlugin = {
       const payload = (event.payload ?? {}) as { name?: unknown; args?: unknown }
       if (isSoundToolCall(payload.name, payload.args)) bump()
     })
+    // Card handshake: tell the backend this Desktop will draw the card for a sound call that is starting,
+    // so the tool answers with the card line. Without it (Desktop half off, another surface, a replay)
+    // the tool answers with a MEDIA: line, which Desktop's own player and every other surface play.
+    ctx.onEvent('tool.start', event => {
+      const profile = currentScope().profile
+      if (event.replayed || (event.profile && profile && event.profile !== profile)) return
+      const payload = (event.payload ?? {}) as { name?: unknown; args?: unknown }
+      for (const prompt of soundPrompts(payload.name, payload.args)) {
+        void ctx.rest('card-ready', { method: 'POST', body: { prompt }, timeoutMs: 10_000 }).catch(() => undefined)
+      }
+    })
     ctx.onEvent(`plugin.${PLUGIN_ID}.settings.changed`, bump)
     ctx.onDispose(() => {
       closeWorkspace?.()
       refreshListeners.clear()
       player.dispose()
+      clearSoundCache()
     })
 
     ctx.registerMany([

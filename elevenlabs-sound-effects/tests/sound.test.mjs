@@ -2,7 +2,17 @@
 import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
-import { isSoundToolCall, matches, nextActions, ratePerSecond } from '../src/sound.ts'
+import {
+  isSoundToolCall,
+  lengthLabel,
+  matches,
+  nextActions,
+  PromiseCache,
+  ratePerSecond,
+  SEND_FAILED,
+  soundPrompts,
+  submitToChat
+} from '../src/sound.ts'
 
 const rec = over => ({
   id: 'abcdef012345',
@@ -85,4 +95,64 @@ test('library search matches every term', () => {
   assert.ok(matches(rec(), 'glass stone'))
   assert.ok(matches(rec(), 'v2 mp3'))
   assert.ok(!matches(rec(), 'glass rain'))
+})
+
+test('the card handshake reads the exact prompt from direct and tool-search calls', () => {
+  const prompt = '  rain 🌧️ on a tin roof\n  then thunder  '
+  assert.deepEqual(soundPrompts('elevenlabs_sound_effect', { prompt }), [prompt])
+  assert.deepEqual(soundPrompts('tool_call', { calls: [{ name: 'elevenlabs_sound_effect', arguments: { prompt } }] }), [prompt])
+  assert.deepEqual(soundPrompts('tool_call', { calls: [{ name: 'elevenlabs_sound_effect', arguments: JSON.stringify({ prompt }) }] }), [prompt])
+  assert.deepEqual(soundPrompts('tool_call', { calls: JSON.stringify([{ name: 'elevenlabs_sound_effect', arguments: { prompt: 'a' } }, { name: 'x', arguments: { prompt: 'b' } }]) }), ['a'])
+  assert.deepEqual(soundPrompts('tool_call', { name: 'elevenlabs_sound_effect', arguments: { prompt: 'legacy' } }), ['legacy'])
+  assert.deepEqual(soundPrompts('web_search', { prompt: 'x' }), [])
+  assert.deepEqual(soundPrompts('elevenlabs_sound_effect', { prompt: 3 }), [])
+})
+
+test('Next keeps the prompt verbatim: no whitespace rewrite, no code-unit slice through an emoji', () => {
+  const prompt = `${'🔔'.repeat(300)}\nthen a door slam`
+  const variations = nextActions(rec({ prompt }))[0]
+  assert.ok(variations.message.includes(JSON.stringify(prompt)), variations.message.slice(0, 120))
+})
+
+test('the Length chip shows the real length and the length asked for when they differ', () => {
+  assert.equal(lengthLabel(rec({ duration_seconds: 1 }), 1.5), '1.5 s (asked 1 s)')
+  assert.equal(lengthLabel(rec({ duration_seconds: 2, length_seconds: 2.25 }), null), '2.25 s (asked 2 s)')
+  assert.equal(lengthLabel(rec({ duration_seconds: 2, length_seconds: 2.0 }), null), '2 s')
+  assert.equal(lengthLabel(rec({ duration_seconds: null, length_seconds: 3.1 }), null), '3.1 s')
+  assert.equal(lengthLabel(rec({ duration_seconds: null }), null), 'auto length')
+})
+
+test('a card in a chat with no session yet addresses that fresh draft, never the active composer', () => {
+  const calls = []
+  const submit = (session, text) => (calls.push([session, text]), session !== 'gone')
+  assert.equal(submitToChat(submit, null, 'hi'), 'sent')
+  assert.equal(submitToChat(submit, 'sess-1', 'hi'), 'sent')
+  assert.equal(submitToChat(submit, undefined, 'hi'), 'sent') // older host: the active composer
+  assert.deepEqual(calls.map(c => c[0]), ['new', 'sess-1', null])
+  assert.equal(submitToChat(submit, 'gone', 'hi'), 'not-visible')
+})
+
+test('a host without composer.submit gets its own notice, not the chat-not-open one', () => {
+  assert.equal(submitToChat(undefined, 'sess-1', 'hi'), 'no-composer')
+  assert.match(SEND_FAILED['no-composer'], /update Desktop/)
+  assert.match(SEND_FAILED['not-visible'], /not open on screen/)
+})
+
+test('decoded sounds are shared, bounded and never cache a failure', async () => {
+  const cache = new PromiseCache(2)
+  let loads = 0
+  const load = v => () => (loads++, Promise.resolve(v))
+  const [a1, a2] = await Promise.all([cache.get('a', load('A')), cache.get('a', load('A'))])
+  assert.equal(a1, 'A')
+  assert.equal(a2, 'A')
+  assert.equal(loads, 1) // two cards of one sound: one request
+  await cache.get('b', load('B'))
+  await cache.get('a', load('A')) // a is now the most recent
+  await cache.get('c', load('C')) // evicts b
+  assert.equal(loads, 3)
+  await cache.get('b', load('B'))
+  assert.equal(loads, 4)
+  await assert.rejects(cache.get('x', () => Promise.reject(new Error('boom'))))
+  await new Promise(r => setTimeout(r, 0))
+  assert.equal(await cache.get('x', load('X')), 'X')
 })

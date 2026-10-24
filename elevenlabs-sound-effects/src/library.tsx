@@ -14,7 +14,7 @@ import {
   kindLabel,
   matches,
   modelLabel,
-  secondsLabel,
+  lengthLabel,
   type SoundRecord
 } from './sound.ts'
 import { Chip, DownloadMenu, S, Transport, useSound, Waveform, Where } from './ui.tsx'
@@ -206,7 +206,7 @@ function LibraryRow({ ctx, rec, info, remote }: { ctx: PluginContext; rec: Sound
       {sound.loaded.state === 'ready' && <Waveform data={sound.loaded.wave} height={30} onSeek={f => void sound.seek(f)} progress={sound.progress} />}
       {sound.loaded.state === 'error' && <span style={S.error}>{sound.loaded.message}</span>}
       <div style={S.row}>
-        <Chip>{sound.duration != null ? secondsLabel(sound.duration) : secondsLabel(rec.duration_seconds)}</Chip>
+        <Chip>{lengthLabel(rec, sound.duration)}</Chip>
         {rec.loop && <Chip>loopable</Chip>}
         <Chip title={rec.model ?? ''}>{modelLabel(rec.model)}</Chip>
         <Chip>{formatLabel(rec.output_format)}</Chip>

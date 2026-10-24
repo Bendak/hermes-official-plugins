@@ -292,7 +292,6 @@ def test_unanswered_calls_say_dont_retry_and_missing_keys_name_the_profile(loade
     assert "Retrying right away will not help" in error
     monkeypatch.setattr(plugin, "_DEADLINE_SECONDS", 0.2)
     assert "Retrying right away will not help" in call({"prompt": "thunder"})["error"]
-    assert "billed" in entry.schema["parameters"]["properties"]["duration_seconds"]["description"]
 
     from hermes_constants import display_hermes_home
 
@@ -321,3 +320,19 @@ def test_a_length_written_into_the_prompt_must_be_passed_as_duration(loaded, sta
     assert call({"prompt": "soft UI click, about 1 second", "duration_seconds": 1})["success"] is True
     assert call({"prompt": "90s hip-hop drum loop, 90 BPM", "loop": True})["success"] is True
     assert [r["body"].get("duration_seconds") for r in stand_ins[0].requests] == [1.0, None]
+
+
+def test_the_key_never_travels_over_plain_http_except_to_this_machine(loaded, stand_ins, monkeypatch,
+                                                                       _hermes_home):
+    """``xi-api-key`` is a header: an ``http://`` endpoint would send it in cleartext. Only a loopback
+    stand-in (localhost, 127.0.0.0/8, ::1) may use http; anything else is refused before any request."""
+    _, call = loaded
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "xi-test-key")
+    for url in ("http://api.elevenlabs.io", "http://10.0.0.5:8080", "http://example.com", "ftp://api.elevenlabs.io"):
+        _write_settings(_hermes_home, api_base_url=url)
+        assert "https" in call({"prompt": "thunder"})["error"], url
+    port = stand_ins[0].url.rsplit(":", 1)[1]
+    for url in (f"http://localhost:{port}", f"http://127.0.0.1:{port}"):
+        _write_settings(_hermes_home, api_base_url=url)
+        assert call({"prompt": "thunder"})["success"] is True, url
+    assert len(stand_ins[0].requests) == 2

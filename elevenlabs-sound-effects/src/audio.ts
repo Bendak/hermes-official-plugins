@@ -3,6 +3,10 @@
 
 import { host, type PluginContext } from '@hermes/plugin-sdk'
 
+import { PromiseCache, type SendResult, submitToChat } from './sound.ts'
+
+export { SEND_FAILED } from './sound.ts'
+
 export interface AudioPayload {
   id: string
   format: string
@@ -19,6 +23,27 @@ export async function decode(dataUrl: string): Promise<AudioBuffer> {
   const bytes = await (await fetch(dataUrl)).arrayBuffer()
   return context().decodeAudioData(bytes)
 }
+
+export interface DecodedSound {
+  buffer: AudioBuffer
+  wave: number[]
+}
+
+// A chat with many cards opens without one /audio read + decode per card per remount: concurrent
+// loads of a sound share one request and the last few decoded sounds stay in memory (~10 MB each
+// for 30 s of 44.1 kHz stereo, so the bound stays small).
+const decoded = new PromiseCache<DecodedSound>(6)
+
+/** Original bytes of sound `id` from the active backend, decoded, with waveform peaks. */
+export function loadSound(ctx: PluginContext, id: string): Promise<DecodedSound> {
+  const scope = currentScope()
+  return decoded.get(`${scope.connection}\u0000${scope.profile}\u0000${id}`, async () => {
+    const buffer = await decode((await fetchAudio(ctx, id, 'original')).data_url)
+    return { buffer, wave: peaks(buffer) }
+  })
+}
+
+export const clearSoundCache = () => decoded.clear()
 
 /** Max |sample| per bucket across channels, 0..1. */
 export function peaks(buffer: AudioBuffer, buckets = 120): number[] {
@@ -204,15 +229,13 @@ export function onScopeChange(fn: () => void): () => void {
 
 /**
  * Send a card's follow-up into the chat that shows the card. Hosts with the directive-owner seam pass
- * `sessionId` (a string, or null for a chat with no session yet) and `host.composer.submit` fails closed
- * when that chat's composer is not visible; `undefined` means an older host, where the active composer
- * (null) is the only address there is. The id is captured when the card renders and the submit runs
+ * `sessionId` (a string, or null for a chat with no session yet, sent as `'new'`) and
+ * `host.composer.submit` fails closed when that chat's composer is not visible; `undefined` means an
+ * older host, where the active composer (null) is the only address there is. The id is captured when the card renders and the submit runs
  * synchronously on click, before any await, so moving to another chat cannot redirect it.
  */
-export function sendToChat(directiveSession: null | string | undefined, text: string): boolean {
-  const submit = host.composer?.submit
-  if (typeof submit !== 'function') return false
-  return submit(directiveSession !== undefined ? directiveSession : null, text)
+export function sendToChat(directiveSession: null | string | undefined, text: string): SendResult {
+  return submitToChat(host.composer?.submit, directiveSession, text)
 }
 
 /** Bytes for one format through the plugin backend (works against a remote Hermes too). */

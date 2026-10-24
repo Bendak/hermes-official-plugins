@@ -35,7 +35,7 @@ surface. Every generation is billed to the user's ElevenLabs account; local proc
 | Argument | Values | Notes |
 |---|---|---|
 | `prompt` | text, at most 450 characters | Required. What the sound is. The tool refuses longer prompts before any request. |
-| `duration_seconds` | 0.5-30 | Omit to let ElevenLabs choose (billed a flat ~50 credits). Set it for anything that must fit a slot (UI blip, cut); billed ~10 credits per second. When the user names a length, pass it here, not in the prompt. |
+| `duration_seconds` | 0.5-30 | Omit to let ElevenLabs choose (billed a flat ~50 credits). Set it for anything that must fit a slot (UI blip, cut); billed ~10 credits per second of the request. When the user names a length, pass it here, not in the prompt. Loops can come back longer than asked: the result's `length_seconds` is the real length. |
 | `loop` | true/false | Seamless loop (ambience, beds, engine hums). |
 | `prompt_influence` | 0-1 (default 0.3) | Higher = more literal, lower = more varied. |
 | `model` | `eleven_text_to_sound_v2`, `eleven_text_to_sound_v3` | Omit to use the user's setting. |
@@ -64,9 +64,14 @@ Keep one sound per call. For a set, make one call per sound with a consistent st
 
 - Set `loop: true` and a `duration_seconds` long enough to avoid obvious repetition (6-20 s for
   ambience, a whole number of bars for music: at 90 BPM one 4/4 bar is 2.667 s).
-- `loopfix` shortens the loop by its crossfade. For music that must stay on a tempo grid, request
-  `duration_seconds` = bar length + crossfade (e.g. 2.687 s for one 90 BPM bar and a 20 ms crossfade)
-  so the fixed loop lands exactly on the bar.
+- Loops often come back longer than requested (measured: 1 s → 1.5 s, 2 s → 2.25 s; 4-6 s exact), and
+  the bill follows the request. The result's `length_seconds` is the length of the file and
+  `length_note` says when it differs; quote that, never the request.
+- Music on a tempo grid: request `duration_seconds` = the bar length (one 4/4 bar at 90 BPM is
+  2.667 s), then read `length_seconds`. `loopfix` shortens a loop by exactly its crossfade, so when the
+  file is longer than the bar, `loopfix --crossfade-ms <(length_seconds - bar) x 1000>` (1-2000 ms)
+  makes it exactly one bar; `probe` the output to confirm. When it is already the bar length, keep it
+  as is if `loopcheck` says `seamless`.
 - Verify the seam before calling it seamless: run `loopcheck` (below) on the file you deliver and report
   its verdict (`seamless`, `click`, or `silent` for a file with nothing audible in it). When it adds a
   `dip_note`, pass that on as a thing to listen for; it is not a failure and never a reason to
@@ -147,10 +152,13 @@ the file names).
 4. Post-process only when the destination needs it (format, loudness, trimming, a loop check).
    Completion: the script printed `"ok": true` for every file, or you report its error line.
 5. Deliver by surface:
-   - Hermes Desktop: one line of text, then the result's `desktop_card` line on its own paragraph:
-     `::elevenlabs-sfx{id="<sound_id>"}`. The card plays, loops and downloads the generated sound, so
-     do not add a MEDIA: line for it. Files you made from it (a `loopfix` result, a conversion, a pack
-     zip) are not in the card: give each on its own `MEDIA:<abs path>` line, and say which one to use.
+   - Hermes Desktop: one line of text, then ONE line for the sound on its own paragraph. If the result
+     has `desktop_card` (`::elevenlabs-sfx{id="<sound_id>"}`), use it: the card plays, loops and
+     downloads the sound, so no MEDIA: line for it. If it has none (the plugin's Desktop half is off,
+     or no Desktop with it watched the call), use the `media_tag` line: Desktop plays it with its own
+     player. Never both for one sound, and never write a card line the result did not give you.
+     Files you made from it (a `loopfix` result, a conversion, a pack zip) are not in the card: give
+     each on its own `MEDIA:<abs path>` line, and say which one to use.
    - Messaging (Telegram, Discord, Slack, WhatsApp, Signal…): put `MEDIA:<file_path>` on its own line
      for every file to send (the tool's `media_tag`). The file path appears ONLY on that line, never
      in prose, or the file is sent twice. Markdown links and images are not delivered.
@@ -159,7 +167,8 @@ the file names).
 6. A sound pack: generate each sound (steps 3-4), then run `pack`; deliver the zip on its own
    `MEDIA:` line (messaging and Desktop) or as a path (CLI), plus the manifest summary. Completion: the zip exists and
    `manifest.json` lists every sound.
-7. End with what was made: per sound the duration, format and the credits billed, plus the loop
+7. End with what was made: per sound the real length (`length_seconds`; say so when `length_note`
+   reports a difference from the request), format and the credits billed, plus the loop
    verdict when a loop was checked. Offer the next step (variations, shorter/longer, a loop, the other model).
 
 ## Pitfalls
@@ -175,7 +184,8 @@ the file names).
 - Post-processing runs where the `terminal` tool runs. With a non-local terminal backend (Docker, SSH,
   Modal) the generated files and this script are not there and every call reports `bad_input`; then
   deliver the original sound and say processing needs the local terminal.
-- The card directive is Desktop-only: other clients print it as text.
+- The card line is Desktop-only and needs the plugin's Desktop half; the tool includes `desktop_card`
+  only when such a Desktop saw the call start. Anywhere else, or without it, the line shows as text.
 - Files live on the machine Hermes runs on. A Desktop connected to a remote Hermes still plays and
   downloads through the card; paths in replies are paths on that host.
 
@@ -183,4 +193,5 @@ the file names).
 
 - Each delivered sound came from a successful tool result (`success: true`) or an `ok: true` script line.
 - Loops you called seamless have a `loopcheck` verdict of `seamless`.
+- Every length you quoted is a `length_seconds` (or a `probe` result), not a requested duration.
 - On messaging, each file appears on exactly one `MEDIA:` line.

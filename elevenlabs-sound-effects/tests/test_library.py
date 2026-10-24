@@ -12,6 +12,7 @@ import json
 import os
 import shutil
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -28,6 +29,7 @@ class _StandIn:
 
     def __init__(self):
         self.bodies: list[dict] = []
+        self.audio = AUDIO
         stand_in = self
 
         class Handler(BaseHTTPRequestHandler):
@@ -35,10 +37,10 @@ class _StandIn:
                 stand_in.bodies.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
                 self.send_response(200)
                 self.send_header("Content-Type", "audio/mpeg")
-                self.send_header("Content-Length", str(len(AUDIO)))
+                self.send_header("Content-Length", str(len(stand_in.audio)))
                 self.send_header("character-cost", "20")
                 self.end_headers()
-                self.wfile.write(AUDIO)
+                self.wfile.write(stand_in.audio)
 
             def log_message(self, *args):
                 pass
@@ -109,7 +111,7 @@ def test_each_generation_is_recorded_and_served_to_the_desktop(loaded, api, stan
     assert result["success"] is True
     sound_id = result["sound_id"]
     assert stand_in.bodies[-1]["model_id"] == "eleven_text_to_sound_v3"  # per-call model overrides the setting
-    assert result["desktop_card"] == f'::elevenlabs-sfx{{id="{sound_id}"}}'
+    assert result["media_tag"] == f"MEDIA:{result['file_path']}"
     assert Path(result["file_path"]).stem.endswith(sound_id)
 
     _, client = api
@@ -118,7 +120,7 @@ def test_each_generation_is_recorded_and_served_to_the_desktop(loaded, api, stan
     assert row == {**row, "id": sound_id, "prompt": "Retro coin pickup", "duration_seconds": 2.0,
                    "loop": False, "prompt_influence": 0.6, "model": "eleven_text_to_sound_v3",
                    "output_format": "mp3_44100_128", "billed_characters": "20",
-                   "session_id": "20261023_120000_abcdef", "kind": "mp3", "exists": True,
+                   "session_id": "20261023_120000_abcdef", "kind": "mp3", "exists": True, "length_seconds": None,
                    "size": len(AUDIO), "path": result["file_path"]}
     assert listing["totals"]["mp3"] == {"count": 1, "bytes": len(AUDIO), "missing": 0}
 
@@ -158,8 +160,17 @@ def test_bad_ids_and_records_never_reach_files_outside_the_audio_folder(api, _he
     prov.record({"id": "bbbbbbbbbbbb", "prompt": "traversal", "output_format": "mp3_44100_128",
                  "file_name": "../../.env"})
 
+    hard = audio_dir / "sfx_hard_20261023_120000_dddddddddddd.mp3"
+    try:
+        os.link(secret, hard)  # same user, same filesystem: no symlink to resolve
+    except (OSError, NotImplementedError):
+        hard = None
+    prov.record({"id": "dddddddddddd", "prompt": "hard link", "output_format": "mp3_44100_128",
+                 "file_name": hard.name if hard else "sfx_gone_20261023_120000_dddddddddddd.mp3"})
+
     assert client.get("/audio?id=aaaaaaaaaaaa").status_code == 410
     assert client.get("/audio?id=bbbbbbbbbbbb").status_code == 410
+    assert client.get("/audio?id=dddddddddddd").status_code == 410
     rows = {r["id"]: r for r in client.get("/sounds").json()["sounds"]}
     assert rows["aaaaaaaaaaaa"]["exists"] is False and rows["bbbbbbbbbbbb"]["path"] is None
     assert client.get("/audio?id=../../x").status_code == 400
@@ -253,3 +264,62 @@ def _write_tone(path: Path, seconds: float = 0.5, rate: int = 48000) -> None:
         out.setframerate(rate)
         out.writeframes(b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * i / rate)))
                                  for i in range(int(seconds * rate))))
+
+# How a generated sound reaches the user. The card line (``desktop_card``) is offered only after a Desktop
+# with this plugin's Desktop half on told the backend it saw the call start (``POST /card-ready``, from its
+# ``tool.start`` listener); otherwise only the ``MEDIA:`` line, which Desktop's built-in player and every
+# messaging surface play, so a Desktop with the half off never gets a card line it shows as text. The
+# length reported is the length of the audio ElevenLabs returned, next to the one requested.
+
+
+def test_the_card_line_needs_a_desktop_that_saw_the_call_start(loaded, api, _hermes_home):
+    _, call = loaded
+    module, client = api
+    prompt = "  Rain on a tin roof 🌧️\nthen distant thunder"  # exact bytes, surrounding spaces included
+
+    plain = call({"prompt": prompt, "duration_seconds": 2})
+    assert plain["success"] is True and "desktop_card" not in plain  # Desktop half off / no Desktop
+    assert plain["media_tag"] == f"MEDIA:{plain['file_path']}"
+
+    assert client.post("/card-ready", json={"prompt": prompt}).json() == {"ok": True}
+    carded = call({"prompt": prompt, "duration_seconds": 2})
+    assert carded["desktop_card"] == f'::elevenlabs-sfx{{id="{carded["sound_id"]}"}}'
+    assert carded["media_tag"] == f"MEDIA:{carded['file_path']}"  # still there for the other surfaces
+
+    assert "desktop_card" not in call({"prompt": "Rain on a tin roof", "duration_seconds": 2})  # other call
+
+    seen = module._prov.data_dir() / module._prov.SEEN_FILE_NAME
+    stale = json.loads(seen.read_text().splitlines()[-1])
+    seen.write_text(json.dumps({**stale, "at": time.time() - 3600}) + "\n")
+    assert "desktop_card" not in call({"prompt": prompt, "duration_seconds": 2})  # an old sighting
+
+
+def test_the_card_handshake_stays_small_and_refuses_junk(loaded, api):
+    _, call = loaded
+    module, client = api
+    assert client.post("/card-ready", json={"prompt": "x" * 5000}).status_code == 422
+    assert client.post("/card-ready", json={}).status_code == 422
+    for n in range(1200):
+        client.post("/card-ready", json={"prompt": f"sound {n}"})
+    seen = module._prov.data_dir() / module._prov.SEEN_FILE_NAME
+    assert seen.stat().st_size <= 64 * 1024
+    assert "desktop_card" in call({"prompt": "sound 1199"})  # the newest sightings survive the trim
+    assert "desktop_card" not in call({"prompt": "sound 3"})
+
+
+def test_the_reported_length_is_the_returned_audio_not_the_request(loaded, api, stand_in, audio):
+    _, call = loaded
+    _, client = api
+    stand_in.audio = audio.mp3(62)  # a 1 s loop request answered with ~1.6 s of MP3, as ElevenLabs does
+    result = call({"prompt": "soft hum loop", "duration_seconds": 1, "loop": True})
+    length = round((62 * 1152 - 2151) / 44100, 3)
+    assert result["length_seconds"] == length and result["requested_duration_seconds"] == 1.0
+    assert f"{length:g} s for the 1 s requested" in result["length_note"]
+    (row,) = client.get("/sounds").json()["sounds"]
+    assert (row["length_seconds"], row["duration_seconds"]) == (length, 1.0)  # duration = what was billed
+
+    stand_in.audio = audio.mp3(78, padding=1080)  # 78 x 1152 - 1656 = 88200 samples = 2.0 s
+    exact = call({"prompt": "door knock", "duration_seconds": 2})
+    assert exact["length_seconds"] == 2.0 and "length_note" not in exact
+    auto = call({"prompt": "door knock"})
+    assert auto["length_seconds"] == 2.0 and auto["requested_duration_seconds"] is None

@@ -72,17 +72,22 @@ and never overwrites an earlier one. Ask the agent to copy it into your project 
 somewhere else.
 
 Each generation also appends one line to `<HERMES_HOME>/plugin-data/<plugin namespace>/sounds.jsonl`
-(the plugin's own data folder, per profile): the sound id, prompt, requested length, loop, prompt
-influence, model, format, file name, size, the credits ElevenLabs billed, and the chat it came from.
+(the plugin's own data folder, per profile): the sound id, prompt, requested length, the length of
+the audio ElevenLabs returned, loop, prompt influence, model, format, file name, size, the credits
+ElevenLabs billed, and the chat it came from.
 The Desktop library reads it. Nothing in it leaves your machine.
 
 ## Hermes Desktop
 
 The Desktop half is opt-in, also after `hermes plugins install` from the CLI (which turns on only the
 agent half): open **Capabilities → Plugins**, switch to the list view, and turn on
-**Desktop: ElevenLabs Sound Effects** on the plugin's row.
+**Desktop: ElevenLabs Sound Effects** on the plugin's row. Without it Desktop still plays every sound,
+in its built-in audio player.
 
-**Sound card.** On Desktop the bundled skill ends each generation with `::elevenlabs-sfx{id="<sound_id>"}`.
+**Sound card.** When the Desktop half is on, it tells the plugin's backend each time it sees the tool
+start, and the tool then hands the agent a card line, `::elevenlabs-sfx{id="<sound_id>"}`, instead of
+the plain `MEDIA:` line. No Desktop half, or a turn on another surface, and the agent gets only the
+`MEDIA:` line, so a sound never arrives as text you can't play.
 The card shows the prompt, length, loop, model, format and credits billed, a waveform you can click
 to seek, Play/Pause, a **Loop** toggle that repeats the sound gaplessly so you can hear the seam,
 **Download** (the original, or MP3 / WAV / OGG converted by ffmpeg on the machine Hermes runs on;
@@ -100,8 +105,11 @@ filter and a prompt search. Each row plays, downloads, reveals, **Reuse prompt**
 and **Open chat** (the conversation that made it). It reloads when a sound is generated, when you
 switch profile or connection, and when you save the plugin's settings; it never polls.
 
-**Remote Hermes.** When Desktop is connected to Hermes on another machine, the files stay on that
-machine. Playback and downloads stream through Hermes, so they work the same. On a registered remote
+**Remote Hermes.** The Desktop half runs in the Desktop app, so install the plugin on the Hermes
+machine (agent half) and into the Desktop you use: **Capabilities → Plugins → Install from Git** with
+`NousResearch/hermes-official-plugins/elevenlabs-sound-effects` and **Desktop UI** checked, then turn
+on the Desktop switch. Without that, Desktop lists the half as unavailable for the remote backend and
+sounds play in its built-in player. The files stay on the Hermes machine. Playback and downloads stream through Hermes, so they work the same. On a registered remote
 connection Reveal is replaced by a note saying which host holds the file; where Desktop can't tell
 (a per-profile remote override) the library names the host the backend reports and Reveal explains
 when the file is not on this computer. Format conversion needs ffmpeg on that host; without it only
@@ -113,7 +121,9 @@ and don't appear in the library.
 Every call is a paid ElevenLabs generation billed to your account: ElevenLabs charges per second of
 audio when a duration is set (about 10 credits per second, as billed to us) and a flat amount per
 generation otherwise (about 50 credits, for 2 s and 3 s automatic clips alike; see their
-[pricing](https://elevenlabs.io/pricing/api)). The tool reports the `character-cost` header
+[pricing](https://elevenlabs.io/pricing/api)). Loops can come back longer than requested (we measured
+1 s → 1.5 s and 2 s → 2.25 s, billed 10 and 20 credits): the tool reports the real length as
+`length_seconds` beside `requested_duration_seconds`, and the card shows both. The tool reports the `character-cost` header
 ElevenLabs returns as `billed_characters`. Desktop format conversions and the processing script run
 locally and cost nothing. What leaves your machine: the sound description and the
 parameters above, sent to `api_base_url` with your API key. Nothing else from the conversation is

@@ -15,6 +15,7 @@ malformed key) is refused before the request goes out.
 from __future__ import annotations
 
 import datetime
+import ipaddress
 import json
 import math
 import os
@@ -28,6 +29,7 @@ from urllib.parse import urlsplit, urlunsplit
 from agent.secret_scope import get_secret
 from tools.registry import tool_error, tool_result
 
+from . import audio_length as _audio_length
 from . import provenance as _provenance
 
 API_KEY_ENV = "ELEVENLABS_API_KEY"
@@ -61,39 +63,25 @@ class ResponseRefused(Exception):
 SCHEMA = {
     "name": "elevenlabs_sound_effect",
     "description": (
-        "Generate a sound effect from a text description with ElevenLabs (up to 30 seconds): foley, "
-        "impacts, ambience, UI sounds, creature noises, short musical stingers or drum loops. "
-        "Describe the sound concretely (source, material, space, intensity), e.g. 'heavy wooden door "
-        "creaking open in a stone hall'; at most 450 characters. When the user names a length, pass it "
-        "as duration_seconds, never in the prompt text. Returns the saved file path and a MEDIA: line; include that "
-        "MEDIA: line in your reply to send the audio to the user. In Hermes Desktop, put the result's "
-        "desktop_card line on its own paragraph instead (it renders a playable card). Each call is billed "
-        "to the user's ElevenLabs account."
+        "Generate a sound effect with ElevenLabs (up to 30 s): foley, impacts, ambience, UI sounds, creature "
+        "noises, stingers, drum loops. Describe it concretely (source, material, space, intensity), e.g. "
+        "'heavy wooden door creaking open in a stone hall'. Reply with the result's media_tag line to deliver "
+        "the audio; in Hermes Desktop, when the result has desktop_card, reply with that line instead (a "
+        "playable card). Billed to the user's ElevenLabs account."
     ),
     "parameters": {
         "type": "object",
         "properties": {
-            "prompt": {"type": "string", "maxLength": MAX_PROMPT_CHARS,
-                       "description": "What the sound effect should sound like (at most 450 characters)."},
+            "prompt": {"type": "string", "maxLength": MAX_PROMPT_CHARS, "description": "What the sound is."},
             "duration_seconds": {
                 "type": "number", "minimum": MIN_SECONDS, "maximum": MAX_SECONDS,
-                "description": (
-                    "Length in seconds (0.5-30). Set it whenever the user names a length: ElevenLabs does "
-                    "not read the length from the prompt text, and an omitted length is billed at a flat "
-                    "rate that costs more than a short clip. Omit only to let ElevenLabs pick."),
+                "description": ("Length in seconds. Set it whenever the user names a length (never in the "
+                                "prompt); omitted, ElevenLabs picks one at a higher flat price."),
             },
-            "loop": {
-                "type": "boolean",
-                "description": "Make the sound loop seamlessly (ambience, music beds). Default false.",
-            },
-            "prompt_influence": {
-                "type": "number", "minimum": 0, "maximum": 1,
-                "description": "0-1: higher follows the prompt more literally, lower varies more. Default 0.3.",
-            },
-            "model": {
-                "type": "string", "enum": list(MODELS),
-                "description": "ElevenLabs model for this sound. Omit to use the user's configured model.",
-            },
+            "loop": {"type": "boolean", "description": "Seamless loop (ambience, music beds)."},
+            "prompt_influence": {"type": "number", "minimum": 0, "maximum": 1,
+                                 "description": "Higher follows the prompt more literally. Default 0.3."},
+            "model": {"type": "string", "enum": list(MODELS), "description": "Omit for the user's setting."},
         },
         "required": ["prompt"],
     },
@@ -178,8 +166,20 @@ def read_settings(settings: Callable[[str], Any]) -> tuple[str, str, str]:
     except ValueError:
         parts = None
     if parts is None or parts.scheme not in ("https", "http") or not parts.hostname:
-        raise ValueError(f"{SETTINGS_KEY}.api_base_url must be an http(s) URL")
+        raise ValueError(f"{SETTINGS_KEY}.api_base_url must be an https URL")
+    if parts.scheme == "http" and not _is_loopback(parts.hostname):
+        # Plain http would send the xi-api-key header in cleartext; only a local stand-in may use it.
+        raise ValueError(f"{SETTINGS_KEY}.api_base_url must use https (http is allowed only for localhost)")
     return model, output_format, base_url
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
 
 
 def _display_url(url: str) -> str:
@@ -321,16 +321,24 @@ def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -
         return tool_error("ElevenLabs returned an empty audio response")
     sound_id = uuid.uuid4().hex[:12]
     path = _save(audio, body["text"], output_format, sound_id)
+    requested = body.get("duration_seconds")
+    length = _audio_length.audio_seconds(audio, FORMATS[output_format])
     result = {
         "success": True, "file_path": path, "media_tag": f"MEDIA:{path}", "sound_id": sound_id,
-        "desktop_card": f'::elevenlabs-sfx{{id="{sound_id}"}}',
         "model": model, "output_format": output_format, "loop": body["loop"],
-        "duration_seconds": body.get("duration_seconds"), "bytes": len(audio),
+        "length_seconds": length, "requested_duration_seconds": requested, "bytes": len(audio),
     }
+    if length is not None and requested is not None and abs(length - requested) >= 0.05:
+        result["length_note"] = (f"ElevenLabs returned {length:g} s for the {requested:g} s requested; the file "
+                                 f"is {length:g} s long (billing follows the request).")
     if cost := headers.get("character-cost"):
         result["billed_characters"] = cost
+    # Card only when a Desktop that draws it is watching this call; otherwise the MEDIA line, which
+    # every surface (Desktop's own player included) plays.
+    if isinstance(args.get("prompt"), str) and _provenance.card_ready(args["prompt"]):
+        result["desktop_card"] = f'::elevenlabs-sfx{{id="{sound_id}"}}'
     _provenance.record({
-        "id": sound_id, "prompt": body["text"], "duration_seconds": body.get("duration_seconds"),
+        "id": sound_id, "prompt": body["text"], "duration_seconds": requested, "length_seconds": length,
         "loop": body["loop"], "prompt_influence": body.get("prompt_influence"), "model": model,
         "output_format": output_format, "file_name": os.path.basename(path), "bytes": len(audio),
         "billed_characters": result.get("billed_characters"), "session_id": session_id or None,

@@ -5,7 +5,7 @@ import { Button, Codicon } from '@hermes/plugin-sdk'
 import { useEffect, useState } from 'react'
 
 import { backendIsRemote, errorText, onScopeChange, statusOf } from './audio.ts'
-import { billed, formatLabel, type HostInfo, modelLabel, secondsLabel, SOUND_ID, type SoundRecord } from './sound.ts'
+import { billed, formatLabel, type HostInfo, lengthLabel, modelLabel, SOUND_ID, type SoundRecord } from './sound.ts'
 import { Chip, DownloadMenu, NextMenu, S, Transport, useSound, Waveform, Where } from './ui.tsx'
 
 const AUTO_LOAD_BYTES = 4 * 1024 * 1024
@@ -122,7 +122,9 @@ function ReadyCard({
         </Button>
       </div>
       <div style={S.row}>
-        <Chip title="Length">{sound.duration != null ? secondsLabel(sound.duration) : secondsLabel(rec.duration_seconds)}</Chip>
+        <Chip title="Length of the sound (and the length asked for, when ElevenLabs returned a different one; it bills the request)">
+          {lengthLabel(rec, sound.duration)}
+        </Chip>
         {rec.loop && <Chip>loopable</Chip>}
         <Chip title={rec.model ?? ''}>{modelLabel(rec.model)}</Chip>
         <Chip>{formatLabel(rec.output_format)}</Chip>

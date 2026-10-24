@@ -18,6 +18,8 @@ export interface GatewayEvent {
   session_id?: string
   profile?: string
   connectionId?: string
+  /** Client-local: recovered/held during a reconnect, not fresh work. */
+  replayed?: boolean
 }
 export interface ReadableAtom<T> {
   get: () => T

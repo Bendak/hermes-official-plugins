@@ -13,7 +13,7 @@ import {
 } from '@hermes/plugin-sdk'
 import { type CSSProperties, type ReactNode, useEffect, useId, useRef, useState } from 'react'
 
-import { decode, errorText, fetchAudio, peaks, player, saveDownload, sendToChat } from './audio.ts'
+import { errorText, fetchAudio, loadSound, player, saveDownload, SEND_FAILED, sendToChat } from './audio.ts'
 import { type HostInfo, kindLabel, nextActions, type SoundRecord } from './sound.ts'
 
 export const S = {
@@ -90,7 +90,7 @@ export function Waveform({ data, progress, onSeek, height = 44 }: { data: number
 type Loaded = { state: 'idle' } | { state: 'loading' } | { state: 'error'; message: string } | { state: 'ready'; buffer: AudioBuffer; wave: number[] }
 
 /**
- * Loads (once) and plays one sound. The decoded audio stays in this component; nothing polls. While it
+ * Loads (once) and plays one sound. Decoded audio comes from a small shared cache (`loadSound`); nothing polls. While it
  * plays, one animation frame per paint advances the progress bar, and the loop stops when playback does.
  */
 export function useSound(ctx: PluginContext, rec: null | SoundRecord, ownerPrefix: string) {
@@ -128,9 +128,8 @@ export function useSound(ctx: PluginContext, rec: null | SoundRecord, ownerPrefi
     if (!rec || !rec.exists) return null
     setLoaded({ state: 'loading' })
     try {
-      const payload = await fetchAudio(ctx, rec.id, 'original')
-      const buffer = await decode(payload.data_url)
-      if (alive.current) setLoaded({ state: 'ready', buffer, wave: peaks(buffer) })
+      const { buffer, wave } = await loadSound(ctx, rec.id)
+      if (alive.current) setLoaded({ state: 'ready', buffer, wave })
       return buffer
     } catch (err) {
       if (alive.current) setLoaded({ state: 'error', message: errorText(err) })
@@ -289,9 +288,8 @@ export function NextMenu({ rec, measured, directiveSession }: { rec: SoundRecord
             data-sfx-action={a.id}
             key={a.id}
             onSelect={() => {
-              if (!sendToChat(directiveSession, a.message)) {
-                host.notify({ kind: 'warning', message: 'This card’s chat is not open on screen: open it, then try again.' })
-              }
+              const sent = sendToChat(directiveSession, a.message)
+              if (sent !== 'sent') host.notify({ kind: 'warning', message: SEND_FAILED[sent] })
             }}
             title={a.message}
           >

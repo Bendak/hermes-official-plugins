@@ -14,9 +14,11 @@ outside that folder.
 from __future__ import annotations
 
 import datetime
+import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -27,8 +29,15 @@ AUDIO_NAME_RE = re.compile(r"sfx_[a-z0-9-]{1,40}_\d{8}_\d{6}_[0-9a-f]{8,12}\.(?:
 # Read at most the newest ~2 MB (several thousand records); older lines stay on disk untouched.
 _TAIL_BYTES = 2 * 1024 * 1024
 _LOCK_OFFSET = 0x7FFFFFFF
-_FIELDS = ("id", "created_at", "prompt", "duration_seconds", "loop", "prompt_influence", "model",
-           "output_format", "file_name", "bytes", "billed_characters", "session_id")
+# `duration_seconds` is the length requested (what ElevenLabs bills, null = automatic); `length_seconds`
+# the length of the audio it returned, which can be longer (loops).
+_FIELDS = ("id", "created_at", "prompt", "duration_seconds", "length_seconds", "loop", "prompt_influence",
+           "model", "output_format", "file_name", "bytes", "billed_characters", "session_id")
+# Desktop-card handshake (see ``mark_card_ready``): a hash of each sound prompt the Desktop half saw start.
+SEEN_FILE_NAME = "desktop_cards.jsonl"
+CARD_WINDOW_SECONDS = 300.0
+_SEEN_MAX_BYTES = 64 * 1024
+_SEEN_TAIL_BYTES = 16 * 1024
 
 
 def data_dir() -> Path:
@@ -51,29 +60,76 @@ def record(entry: dict[str, Any]) -> None:
         timespec="seconds")
     line = json.dumps(row, ensure_ascii=False, separators=(",", ":")) + "\n"
     try:
-        directory = data_dir()
-        directory.mkdir(parents=True, exist_ok=True)
-        # O_APPEND: each write lands at the end even with several writers (one short line per write).
-        fd = os.open(directory / FILE_NAME, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
-        try:
-            if os.name == "nt":  # pragma: no cover - Windows emulates O_APPEND with seek+write: lock it
-                import msvcrt
-                # Windows byte locks are mandatory: lock a sentinel byte far past any real end of file so
-                # readers of the records never hit it, only other writers taking the same lock.
-                os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
-                msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                try:
-                    os.lseek(fd, 0, os.SEEK_END)
-                    os.write(fd, line.encode("utf-8"))
-                finally:
-                    os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
-                    msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-            else:
-                os.write(fd, line.encode("utf-8"))
-        finally:
-            os.close(fd)
+        _append(FILE_NAME, line)
     except (OSError, ImportError, RuntimeError, ValueError):
         pass
+
+
+def _append(name: str, line: str) -> None:
+    directory = data_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    # O_APPEND: each write lands at the end even with several writers (one short line per write).
+    fd = os.open(directory / name, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
+    try:
+        if os.name == "nt":  # pragma: no cover - Windows emulates O_APPEND with seek+write: lock it
+            import msvcrt
+            # Windows byte locks are mandatory: lock a sentinel byte far past any real end of file so
+            # readers of the records never hit it, only other writers taking the same lock.
+            os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
+            try:
+                os.lseek(fd, 0, os.SEEK_END)
+                os.write(fd, line.encode("utf-8"))
+            finally:
+                os.lseek(fd, _LOCK_OFFSET, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            os.write(fd, line.encode("utf-8"))
+    finally:
+        os.close(fd)
+
+
+def _prompt_key(prompt: str) -> str:
+    return hashlib.sha256(prompt.encode("utf-8", "surrogatepass")).hexdigest()[:32]
+
+
+def mark_card_ready(prompt: str) -> None:
+    """The Desktop half saw a sound tool call with ``prompt`` start, so a card for its result will
+    render there. Called by the backend route the Desktop half posts to; the tool reads it back with
+    ``card_ready``. Only a hash of the prompt and the time are stored."""
+    line = json.dumps({"key": _prompt_key(prompt), "at": round(time.time(), 3)}) + "\n"
+    _append(SEEN_FILE_NAME, line)
+    path = data_dir() / SEEN_FILE_NAME
+    if path.stat().st_size > _SEEN_MAX_BYTES:  # keep it small: only the last minutes matter
+        keep = path.read_bytes()[-_SEEN_TAIL_BYTES:].split(b"\n", 1)[-1]
+        tmp = path.with_name(f".{SEEN_FILE_NAME}.{os.getpid()}.tmp")
+        tmp.write_bytes(keep)
+        os.replace(tmp, path)
+
+
+def card_ready(prompt: str, window: float = CARD_WINDOW_SECONDS) -> bool:
+    """Did a Desktop with this plugin's Desktop half on see a sound call with ``prompt`` start within
+    ``window`` seconds? False on any doubt: the caller then delivers the plain ``MEDIA:`` line, which
+    every surface plays."""
+    try:
+        with open(data_dir() / SEEN_FILE_NAME, "rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - _SEEN_TAIL_BYTES))
+            raw = handle.read()
+    except (OSError, ImportError, RuntimeError, ValueError):
+        return False
+    key, now = _prompt_key(prompt), time.time()
+    for line in raw.split(b"\n"):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("key") != key:
+            continue
+        at = row.get("at")
+        if isinstance(at, (int, float)) and now - window <= at <= now + 5:
+            return True
+    return False
 
 
 def read_all() -> list[dict[str, Any]]:
@@ -123,7 +179,8 @@ def find(sound_id: str) -> dict[str, Any] | None:
 
 def audio_path(row: dict[str, Any]) -> Path | None:
     """The record's file inside this profile's ``cache/generated/audio``, or ``None`` when the name
-    is not one this plugin writes, the file is gone, or it resolves (symlink) outside the folder."""
+    is not one this plugin writes, the file is gone, it resolves (symlink) outside the folder, or it
+    is hard-linked (possibly to a file elsewhere)."""
     name = row.get("file_name")
     if not isinstance(name, str) or not AUDIO_NAME_RE.fullmatch(name):
         return None
@@ -134,5 +191,11 @@ def audio_path(row: dict[str, Any]) -> Path | None:
     except (OSError, RuntimeError):
         return None
     if resolved.parent != root_resolved or not resolved.is_file():
+        return None
+    # A hard link has no symlink to resolve: refuse any extra link, the tool writes each file once.
+    try:
+        if resolved.stat().st_nlink > 1:
+            return None
+    except OSError:
         return None
     return resolved

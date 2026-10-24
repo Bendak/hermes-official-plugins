@@ -5,7 +5,11 @@ export interface SoundRecord {
   id: string
   created_at: null | string
   prompt: null | string
+  /** The length requested (what ElevenLabs bills); null = automatic length. */
   duration_seconds: null | number
+  /** The length of the audio ElevenLabs returned (loops can come back longer); null when unknown
+   *  (a record from an earlier build, or a file the tool could not read). */
+  length_seconds?: null | number
   loop: boolean | null
   prompt_influence: null | number
   model: null | string
@@ -53,8 +57,18 @@ export function bytesLabel(n: null | number): string {
 }
 
 export const secondsLabel = (s: null | number | undefined): string =>
-  typeof s === 'number' && Number.isFinite(s) ? `${s < 10 ? s.toFixed(1).replace(/\.0$/, '') : Math.round(s)} s` : 'auto length'
+  typeof s === 'number' && Number.isFinite(s) ? `${s < 10 ? s.toFixed(2).replace(/\.?0+$/, '') : Math.round(s)} s` : 'auto length'
 
+/** The Length chip: the real length (decoded here, else the tool's measurement), plus what was asked for
+ *  when ElevenLabs returned a different length (it bills the request). */
+export function lengthLabel(rec: Pick<SoundRecord, 'duration_seconds' | 'length_seconds'>, decoded: null | number): string {
+  const real = decoded ?? (typeof rec.length_seconds === 'number' ? rec.length_seconds : null)
+  const asked = rec.duration_seconds
+  if (real == null) return secondsLabel(asked)
+  return typeof asked === 'number' && Math.abs(real - asked) >= 0.05
+    ? `${secondsLabel(real)} (asked ${secondsLabel(asked)})`
+    : secondsLabel(real)
+}
 /** Credits the record was billed, from ElevenLabs' `character-cost` header (null when it sent none). */
 export function billed(rec: Pick<SoundRecord, 'billed_characters'>): null | number {
   const n = Number(rec.billed_characters)
@@ -123,7 +137,8 @@ function costFor(rec: SoundRecord, seconds: null | number): { line: string; tota
  * automatic length.
  */
 export function nextActions(rec: SoundRecord, measured: null | number = null): NextAction[] {
-  const prompt = (rec.prompt || '').replace(/\s+/g, ' ').trim().slice(0, 450)
+  // Verbatim: the tool refuses an over-long prompt itself, and rewriting whitespace would change the sound.
+  const prompt = (rec.prompt || '').trim()
   if (!prompt) return []
   const model = rec.model && (MODELS as readonly string[]).includes(rec.model) ? rec.model : MODELS[0]
   const base: ToolArgs = {
@@ -186,13 +201,75 @@ export function nextActions(rec: SoundRecord, measured: null | number = null): N
   return out
 }
 
-/** Does a tool.complete payload belong to this plugin's tool (direct, or wrapped by tool search's `tool_call`)? */
-export function isSoundToolCall(name: unknown, args: unknown): boolean {
-  if (name === TOOL) return true
-  if (name !== 'tool_call' || !args || typeof args !== 'object') return false
-  const a = args as { name?: unknown; calls?: unknown }
-  if (a.name === TOOL) return true
-  return Array.isArray(a.calls) && a.calls.some(c => !!c && typeof c === 'object' && (c as { name?: unknown }).name === TOOL)
+/** This plugin's tool calls inside a tool event: direct, or wrapped by tool search's `tool_call` (its
+ *  `{calls: [{name, arguments}]}` batch, a JSON-string batch, or the legacy single `{name, arguments}`). */
+function soundCalls(name: unknown, args: unknown): Record<string, unknown>[] {
+  const obj = (v: unknown): null | Record<string, unknown> => {
+    if (typeof v === 'string') {
+      try {
+        v = JSON.parse(v)
+      } catch {
+        return null
+      }
+    }
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null
+  }
+  const a = obj(args)
+  if (name === TOOL) return a ? [a] : [{}]
+  if (name !== 'tool_call' || !a) return []
+  let calls: unknown = a.calls ?? [{ name: a.name, arguments: a.arguments }]
+  if (typeof calls === 'string') {
+    try {
+      calls = JSON.parse(calls)
+    } catch {
+      calls = []
+    }
+  }
+  const list = Array.isArray(calls) ? calls : [calls]
+  return list.flatMap(c => {
+    const call = obj(c)
+    return call && call.name === TOOL ? [obj(call.arguments) ?? {}] : []
+  })
+}
+
+/** Does a tool event belong to this plugin's tool (direct, or wrapped by tool search's `tool_call`)? */
+export const isSoundToolCall = (name: unknown, args: unknown): boolean => soundCalls(name, args).length > 0
+
+/** The exact `prompt` strings of this plugin's calls in a `tool.start` event (the card handshake key). */
+export const soundPrompts = (name: unknown, args: unknown): string[] =>
+  soundCalls(name, args).flatMap(a => (typeof a.prompt === 'string' ? [a.prompt] : []))
+
+/**
+ * Promise cache with a small LRU bound: concurrent loads of one key share a single request, a few
+ * recent results stay for remounts (virtualised scroll, two cards of one sound), and a failure is
+ * dropped so a retry really retries.
+ */
+export class PromiseCache<T> {
+  private entries = new Map<string, Promise<T>>()
+  private readonly limit: number
+  constructor(limit: number) {
+    this.limit = limit
+  }
+
+  get(key: string, load: () => Promise<T>): Promise<T> {
+    const hit = this.entries.get(key)
+    if (hit) {
+      this.entries.delete(key)
+      this.entries.set(key, hit)
+      return hit
+    }
+    const pending = load()
+    this.entries.set(key, pending)
+    pending.catch(() => {
+      if (this.entries.get(key) === pending) this.entries.delete(key)
+    })
+    while (this.entries.size > this.limit) this.entries.delete(this.entries.keys().next().value as string)
+    return pending
+  }
+
+  clear(): void {
+    this.entries.clear()
+  }
 }
 
 export const SOUND_ID = /^[0-9a-f]{12}$/
@@ -205,4 +282,23 @@ export function matches(rec: SoundRecord, query: string): boolean {
     .split(/\s+/)
     .filter(Boolean)
     .every(term => hay.includes(term))
+}
+
+export type SendResult = 'no-composer' | 'not-visible' | 'sent'
+
+/**
+ * Submit a card's follow-up through `host.composer.submit` (passed in, so this stays SDK-free). A
+ * directive-owner host hands the card a `sessionId`: a string, or null for a chat with no session yet,
+ * which is sent as `'new'` (that fresh draft only; `null` would mean the ACTIVE composer, possibly
+ * another chat). `undefined` is an older host, where the active composer is the only address.
+ */
+export function submitToChat(submit: unknown, directiveSession: null | string | undefined, text: string): SendResult {
+  if (typeof submit !== 'function') return 'no-composer'
+  const address = directiveSession === undefined ? null : (directiveSession ?? 'new')
+  return (submit as (session: null | string, text: string) => boolean)(address, text) ? 'sent' : 'not-visible'
+}
+
+export const SEND_FAILED: Record<Exclude<SendResult, 'sent'>, string> = {
+  'no-composer': 'This Hermes Desktop cannot send a message for a plugin: update Desktop, or type the request yourself.',
+  'not-visible': 'This card’s chat is not open on screen: open it, then try again.'
 }
