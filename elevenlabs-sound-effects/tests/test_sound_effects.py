@@ -294,11 +294,15 @@ def test_unanswered_calls_say_dont_retry_and_missing_keys_name_the_profile(loade
     assert "Retrying right away will not help" in call({"prompt": "thunder"})["error"]
     assert "billed" in entry.schema["parameters"]["properties"]["duration_seconds"]["description"]
 
+    from hermes_constants import display_hermes_home
+
     monkeypatch.delenv("ELEVENLABS_API_KEY")
-    assert "~/.hermes/.env" in call({"prompt": "thunder"})["error"]
+    default_env = f"{display_hermes_home()}/.env"  # host-specific form (Windows shows the temp-dir path)
+    assert default_env in call({"prompt": "thunder"})["error"]
     token = set_hermes_home_override(_hermes_home / "profiles" / "b")
     try:
-        assert "~/.hermes/profiles/b/.env" in call({"prompt": "thunder"})["error"]
+        error = call({"prompt": "thunder"})["error"]
+        assert "profiles/b/.env" in error.replace("\\", "/") and default_env not in error, error
     finally:
         reset_hermes_home_override(token)
 
