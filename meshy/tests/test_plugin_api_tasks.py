@@ -475,6 +475,22 @@ def test_one_tasks_failed_read_never_fails_the_others(api, meshy):
     assert err.status_code == 403 and "ip_not_authorized" in err.detail
 
 
+def test_a_refused_key_stops_the_chip_even_when_the_tasks_route_is_cached(api, meshy):
+    """A card poll caches the task's route, so a later read skips the generic probe; an IP allowlist refusing every
+    route must still fail the whole chip request, while a refusal on the task's own route alone stays that task's."""
+    task = meshy.add("convert", 54, status="IN_PROGRESS", progress=30)
+    other = meshy.add("text-to-3d-preview", 55, status="IN_PROGRESS", progress=50)
+    assert api.task_state(task)["status"] == "IN_PROGRESS"  # route cached
+    meshy.overrides = {f"{_ROUTES['convert']}/{task}": (403, {}, b'{"message": "plan lacks convert"}')}
+    got = api.active(tasks=f"convert:{task},text-to-3d:{other}")
+    assert (got["failed"], [t["task_id"] for t in got["tasks"]]) == ([task], [other])
+    refused = (403, {}, b'{"message": "ip_not_authorized"}')
+    meshy.overrides = {f"{r}/{t}": refused for r in set(_ROUTES.values()) for t in (task, other)}
+    for tasks in (f"convert:{task},text-to-3d:{other}", f"any:{task}"):
+        err = _status(api.active, tasks=tasks)
+        assert err.status_code == 403 and "ip_not_authorized" in err.detail, tasks
+
+
 def test_progress_chip_reads_share_a_cap_across_windows(api, meshy, monkeypatch):
     """Each window's chip polls on its own; together their Meshy reads stay within _FANOUT in flight."""
     ids = [meshy.add("text-to-3d-preview", 60 + i, status="IN_PROGRESS") for i in range(api._ACTIVE_MAX)]

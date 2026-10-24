@@ -57,7 +57,9 @@ function rig({ foreign = () => false, scope = () => '' } = {}) {
     /** Advance the clock by `ms`, running due timers and letting their promises settle. */
     async advance(ms) {
       const end = now + ms
+      let steps = 0
       for (;;) {
+        if (++steps > 20_000) throw new Error('timer storm: the tracker keeps re-arming without waiting')
         timers.sort((a, b) => a.at - b.at)
         const t = timers[0]
         if (!t || t.at > end) break
@@ -253,4 +255,40 @@ test("untagged tasks seen under one profile are not polled through another's key
   await r.advance(1000)
   assert.deepEqual(queried(r.calls.at(-1)), [`text-to-3d:${ID}`])
   assert.deepEqual(r.states.at(-1).tasks.map(t => t.task_id), [ID])
+})
+
+test('a lone task in backoff waits for its retry time instead of spinning', async () => {
+  const r = rig()
+  r.setReply(path => ({ tasks: [], done: [], missing: [], failed: queried(path).map(q => q.split(':')[1]) }))
+  created(r, ID)
+  await r.advance(10 * 60_000)
+  assert.ok(r.calls.length >= 5 && r.calls.length <= (10 * 60_000) / MAX_BACKOFF_MS + 6, `${r.calls.length} reads in 10 min`)
+  assert.equal(r.pending(), 1)
+})
+
+test('a task tagged with another profile is polled once that profile is in front', async () => {
+  let front = 'A'
+  const r = rig({ scope: () => front, foreign: o => !!o?.profile && o.profile !== front })
+  r.setReply(path => ({ tasks: queried(path).map(q => running(q.split(':')[1], 10)), done: [], missing: [] }))
+  created(r, ID, 'text_to_3d', { profile: 'B' })
+  await r.advance(5000)
+  assert.equal(r.calls.length, 0, "B's task is not read through A's key")
+  front = 'B'
+  r.tracker.rescope()
+  await r.advance(1000)
+  assert.equal(r.calls.length, 1, 'polled once B is in front')
+  assert.deepEqual(queried(r.calls.at(-1)), [`text-to-3d:${ID}`])
+})
+
+test('tasks beyond the newest MAX_WATCHED are neither read nor shown', async () => {
+  const r = rig()
+  const ids = Array.from({ length: 10 }, (_, i) => `01a157b8-7317-7551-abc5-${String(100 + i).padStart(12, '0')}`)
+  r.setReply(path => ({ tasks: queried(path).map(q => running(q.split(':')[1], 5)), done: [], missing: [] }))
+  for (const id of ids.slice(0, 2)) created(r, id)
+  await r.advance(1000)
+  for (const id of ids.slice(2)) created(r, id)
+  await r.advance(ACTIVE_POLL_MS)
+  const shown = r.states.at(-1).tasks.map(t => t.task_id)
+  assert.equal(shown.length, 8)
+  assert.ok(!shown.includes(ids[0]) && !shown.includes(ids[1]), 'the two oldest drop off the chip')
 })
