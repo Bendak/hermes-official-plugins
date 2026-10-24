@@ -239,6 +239,36 @@ export const isSoundToolCall = (name: unknown, args: unknown): boolean => soundC
 export const soundPrompts = (name: unknown, args: unknown): string[] =>
   soundCalls(name, args).flatMap(a => (typeof a.prompt === 'string' ? [a.prompt] : []))
 
+type RestCall = (path: string, opts: { method: string; body?: unknown; timeoutMs?: number }) => Promise<unknown>
+
+/**
+ * The Desktop half's side of the card handshake. `saw` tells the backend a sound call started in a chat
+ * (`session` = the event's session id), so that call answers with the card line. `close` (the half is
+ * switched off or unloaded) forgets this instance's sightings, but only after every `saw` still in
+ * flight has settled: a DELETE that overtook a late POST would leave a sighting behind, and that call
+ * would get a card line nothing draws.
+ */
+export function cardHandshake(rest: RestCall, owner: string) {
+  const pending = new Set<Promise<unknown>>()
+  let closed = false
+  return {
+    saw(prompt: string, session: string | undefined): void {
+      if (closed) return
+      const body = session ? { prompt, owner, session } : { prompt, owner }
+      const sent = rest('card-ready', { method: 'POST', body, timeoutMs: 10_000 }).catch(() => undefined)
+      pending.add(sent)
+      void sent.then(() => pending.delete(sent))
+    },
+    async close(): Promise<void> {
+      closed = true
+      await Promise.allSettled([...pending])
+      await rest(`card-ready?owner=${encodeURIComponent(owner)}`, { method: 'DELETE', timeoutMs: 10_000 }).catch(
+        () => undefined
+      )
+    }
+  }
+}
+
 /**
  * Promise cache with a small LRU bound: concurrent loads of one key share a single request, a few
  * recent results stay for remounts (virtualised scroll, two cards of one sound), and a failure is

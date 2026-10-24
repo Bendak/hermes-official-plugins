@@ -88,9 +88,15 @@ agent half): open **Capabilities → Plugins**, switch to the list view, and tur
 in its built-in audio player.
 
 **Sound card.** When the Desktop half is on, it tells the plugin's backend each time it sees the tool
-start, and the tool then hands the agent a card line, `::elevenlabs-sfx{id="<sound_id>"}`, instead of
-the plain `MEDIA:` line. No Desktop half, or a turn on another surface, and the agent gets only the
-`MEDIA:` line, so a sound never arrives as text you can't play.
+start, and in which chat. That one call, in that chat, then hands the agent a card line,
+`::elevenlabs-sfx{id="<sound_id>"}`, instead of the plain `MEDIA:` line. In every other case the agent
+gets only the `MEDIA:` line, so a sound never arrives as text you can't play: no Desktop half, a turn
+in another chat or on another surface (CLI, TUI, Telegram and the other messaging apps, cron), a turn
+whose surface Hermes can't tell, a call that waited more than two minutes for approval, and every call
+when the plugin runs in the plugin host (`plugins.isolation: host`), where the turn's surface is not
+known. One known gap: two windows showing the same chat, one with the Desktop half on and one
+without (two Desktops on one remote Hermes, or the dashboard's chat view of a Desktop chat). The
+second shows the card line as text; turn the half on in both, or off in both.
 The card shows the prompt, length, loop, model, format and credits billed, a waveform you can click
 to seek, Play/Pause, a **Loop** toggle that repeats the sound gaplessly so you can hear the seam,
 **Download** (the original, or MP3 / WAV / OGG converted by ffmpeg on the machine Hermes runs on;

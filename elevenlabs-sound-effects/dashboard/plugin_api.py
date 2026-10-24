@@ -12,9 +12,10 @@ Routes:
     GET /sound?id=               one sound's record (for the in-chat card)
     GET /audio?id=&format=       the sound's bytes: ``original`` or, when ffmpeg is on this host,
                                  ``mp3`` / ``wav`` / ``ogg`` converted on the fly (nothing is billed)
-    POST /card-ready {prompt, owner}  the Desktop half saw a sound tool call start (its ``tool.start``
-                                 event): the tool then answers with the card line instead of only
-                                 ``MEDIA:``, because a Desktop that will draw the card is watching
+    POST /card-ready {prompt, owner, session}  the Desktop half saw a sound tool call start in chat
+                                 ``session`` (its ``tool.start`` event): that call, in that chat, then
+                                 answers with the card line instead of only ``MEDIA:``, because a Desktop
+                                 that will draw the card is watching
     DELETE /card-ready?owner=    that Desktop half was switched off: forget its sightings
 """
 
@@ -179,9 +180,9 @@ _MAX_PROMPT_CHARS = 4096
 
 @router.post("/card-ready")
 def card_ready(prompt: str = Body(..., max_length=_MAX_PROMPT_CHARS),
-               owner: str = Body("", max_length=64)) -> dict:
+               owner: str = Body("", max_length=64), session: str = Body("", max_length=256)) -> dict:
     try:
-        _prov.mark_card_ready(prompt, owner)
+        _prov.mark_card_ready(prompt, owner, session)
     except OSError as exc:
         raise HTTPException(status_code=500, detail=f"could not record the card handshake: {exc.strerror or exc}") from None
     return {"ok": True}

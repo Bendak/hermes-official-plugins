@@ -268,14 +268,27 @@ def _download(base_url: str, output_format: str, body: dict, api_key: str):
     return outcome["value"]
 
 
-def _messaging_turn() -> bool:
-    """Is this call part of a Telegram/Discord/Slack/... turn? A Desktop open on the same profile hears
-    that turn's tool events too, and would vouch for a card nobody on that surface can render."""
+def _card_sessions(session_id: str) -> set[str]:
+    """The ids a Desktop sighting may name for this call's chat, or an empty set when the card line must
+    not be offered. Empty unless the turn's surface is KNOWN and is not a messaging channel: a Desktop
+    open on the same profile hears a Telegram/Discord/Slack turn's tool events too, and would vouch for a
+    card nobody on that surface can render. Inside the plugin host process (``plugins.isolation: host``)
+    the caller's session context does not arrive, so the surface is unknown there and the answer is
+    always empty: the call delivers the ``MEDIA:`` line, which plays everywhere."""
+    if os.environ.get("HERMES_PLUGIN_HOST_PROCESS") == "1":
+        return set()
     try:
-        from gateway.session_context import session_is_messaging_surface
+        from gateway.session_context import get_session_env, session_is_messaging_surface
     except ImportError:  # pragma: no cover - every supported host (>= 0.22.0) has it
-        return True
-    return session_is_messaging_surface()
+        return set()
+    surface = (os.getenv("HERMES_PLATFORM") or "", get_session_env("HERMES_SESSION_PLATFORM", ""),
+               get_session_env("HERMES_SESSION_SOURCE", ""))
+    if not any(str(name or "").strip() for name in surface) or session_is_messaging_surface():
+        return set()
+    # The Desktop event names the chat by its durable id on current hosts and by its UI tab id on
+    # 0.22.x; the tool knows both for its own turn.
+    ids = (session_id, get_session_env("HERMES_UI_SESSION_ID", ""))
+    return {value for value in ids if isinstance(value, str) and value}
 
 
 def _slug(text: str) -> str:
@@ -349,8 +362,8 @@ def generate(args: dict, settings: Callable[[str], Any], session_id: str = "") -
     # Card only when a Desktop that draws it is watching this call; otherwise the MEDIA line, which
     # every surface (Desktop's own player included) plays.
     since = started - _provenance.CARD_SLACK_SECONDS
-    if (isinstance(args.get("prompt"), str) and not _messaging_turn()
-            and _provenance.card_ready(args["prompt"], since)):
+    sessions = _card_sessions(session_id) if isinstance(args.get("prompt"), str) else set()
+    if sessions and _provenance.card_ready(args["prompt"], since, sessions):
         result["desktop_card"] = f'::elevenlabs-sfx{{id="{sound_id}"}}'
     _provenance.record({
         "id": sound_id, "prompt": body["text"], "duration_seconds": requested, "length_seconds": length,

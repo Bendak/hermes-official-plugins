@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  cardHandshake,
   isSoundToolCall,
   lengthLabel,
   matches,
@@ -155,4 +156,42 @@ test('decoded sounds are shared, bounded and never cache a failure', async () =>
   await assert.rejects(cache.get('x', () => Promise.reject(new Error('boom'))))
   await new Promise(r => setTimeout(r, 0))
   assert.equal(await cache.get('x', load('X')), 'X')
+})
+
+test('switching the Desktop half off forgets its sightings only after the ones in flight landed', async () => {
+  const calls = []
+  const lands = []
+  const rest = (path, opts) => {
+    calls.push([opts.method, path, opts.body])
+    if (opts.method === 'POST') return new Promise(resolve => lands.push(resolve))
+    return Promise.resolve({ ok: true })
+  }
+  const handshake = cardHandshake(rest, 'owner-1')
+  handshake.saw('door knock', 'desk-1')
+  handshake.saw('glass tap', undefined) // a host whose events name no chat
+  assert.deepEqual(calls.map(c => c[2]), [
+    { prompt: 'door knock', owner: 'owner-1', session: 'desk-1' },
+    { prompt: 'glass tap', owner: 'owner-1' }
+  ])
+  const closed = handshake.close()
+  lands[0]({ ok: true })
+  await new Promise(resolve => setTimeout(resolve, 20))
+  assert.equal(calls.filter(c => c[0] === 'DELETE').length, 0) // the second POST is still in flight
+  lands[1]({ ok: true })
+  await closed
+  assert.deepEqual(calls.at(-1), ['DELETE', 'card-ready?owner=owner-1', undefined])
+  handshake.saw('late', 'desk-1') // after close: nothing is sent
+  assert.equal(calls.length, 3)
+})
+
+test('a failed sighting does not hold up the switch-off', async () => {
+  const calls = []
+  const rest = (path, opts) => {
+    calls.push(opts.method)
+    return opts.method === 'POST' ? Promise.reject(new Error('backend gone')) : Promise.resolve({ ok: true })
+  }
+  const handshake = cardHandshake(rest, 'o')
+  handshake.saw('door knock', 'desk-1')
+  await handshake.close()
+  assert.deepEqual(calls, ['POST', 'DELETE'])
 })

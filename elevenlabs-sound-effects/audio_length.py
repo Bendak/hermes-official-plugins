@@ -3,7 +3,8 @@
 ElevenLabs can return more audio than was asked for (a 1 s loop came back 1.5 s long, 2 s loops 2.25 s),
 so the tool reports the length of the file it saved, not the request. Handles every ``output_format``
 the plugin offers: MP3 (frame scan minus the LAME encoder delay and padding), WAV (RIFF header) and Ogg Opus (last
-granule minus the start offset and pre-skip). Returns ``None`` for anything it cannot read; it never raises and never runs ffprobe.
+granule minus the start offset and pre-skip). Returns ``None`` for anything it cannot read or a length the
+byte count cannot hold; it never raises and never runs ffprobe.
 """
 
 from __future__ import annotations
@@ -73,18 +74,24 @@ def _synced(data: bytes, pos: int, run: int = 3) -> bool:
     return pos <= len(data)
 
 
+# How far past the ID3 tag the first MPEG frame may start. Encoders put it right after
+# the tag; a junk response would otherwise cost seconds of pure-Python scanning per 50 MB.
+_JUNK_SCAN_BYTES = 64 * 1024
+
+
 def mp3_seconds(data: bytes) -> float | None:
     pos = 0
     if data[:3] == b"ID3" and len(data) >= 10:
         size = (data[6] & 0x7F) << 21 | (data[7] & 0x7F) << 14 | (data[8] & 0x7F) << 7 | (data[9] & 0x7F)
         pos = 10 + size + (10 if data[5] & 0x10 else 0)
+    scan_end = pos + _JUNK_SCAN_BYTES
     samples, rate, first, trim = 0, 0, True, 0
     while pos < len(data):
         frame = _mp3_frame(data, pos) if not first or _synced(data, pos) else None
         if frame is None:
             if first:  # skip junk before the first frame, to a run of 3 consistent frames
-                nxt = data.find(b"\xff", pos + 1)
-                if nxt < 0:
+                nxt = data.find(b"\xff", pos + 1, scan_end)
+                if nxt < 0:  # no audio start in the first 64 KiB: not an MP3 (bounds the scan's CPU)
                     break
                 pos = nxt
                 continue
@@ -176,6 +183,9 @@ def opus_seconds(data: bytes) -> float | None:
 
 
 _READERS = {"mp3": mp3_seconds, "wav": wav_seconds, "opus": opus_seconds}
+# No file in these formats carries audio below ~6 kbit/s (Opus' floor; MP3 starts at 8, PCM far above),
+# so a length the byte count cannot hold at 4 kbit/s comes from a corrupt header or granule.
+_MIN_BITS_PER_SECOND = 4000
 
 
 def audio_seconds(data: bytes, extension: str) -> float | None:
@@ -185,4 +195,6 @@ def audio_seconds(data: bytes, extension: str) -> float | None:
         seconds = reader(data) if reader else None
     except (struct.error, IndexError, KeyError, ZeroDivisionError):
         seconds = None
-    return round(seconds, 3) if seconds and seconds > 0 else None
+    if not seconds or seconds <= 0 or seconds > len(data) * 8 / _MIN_BITS_PER_SECOND:
+        return None
+    return round(seconds, 3)

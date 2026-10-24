@@ -123,7 +123,8 @@ the file names).
   capped by a -1.5 dBTP true-peak ceiling, `--fade-ms` adds in/out fades (refused when the two fades
   would cover the whole clip). Without options it only converts. It never overwrites its input. Its
   JSON `output` carries the measured `integrated_lufs` and `true_peak_dbtp`: report the measured
-  loudness, not the target (`applied.loudness_note` says when they differ by more than 1 LU; a clip under 0.4 s gets one plain gain, measured looped).
+  loudness, not the target (`applied.loudness_note` says when they differ by more than 1 LU; a clip under 0.4 s gets one plain gain, measured looped; clips of 0.4–3 s go through loudnorm and land within
+  about 0.5 LU, and the reported measurement is the real result).
 - `loopfix`: crossfade of the loop's last N ms into its first N ms, gain-matched to how alike the two
   segments are (`seam_correlation`); the result is N ms shorter and its seam jump is gone. An
   anti-correlated seam (`seam_correlation` well below 0) or an attack inside the first N ms can leave
@@ -187,7 +188,8 @@ the file names).
   Modal) the generated files and this script are not there and every call reports `bad_input`; then
   deliver the original sound and say processing needs the local terminal.
 - The card line is Desktop-only and needs the plugin's Desktop half; the tool includes `desktop_card`
-  only when such a Desktop saw the call start. Anywhere else, or without it, the line shows as text.
+  only when such a Desktop saw this call start in this chat. Anywhere else, or without it, the line
+  shows as text.
 - Files live on the machine Hermes runs on. A Desktop connected to a remote Hermes still plays and
   downloads through the card; paths in replies are paths on that host.
 

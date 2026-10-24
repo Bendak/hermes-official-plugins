@@ -266,50 +266,135 @@ def _write_tone(path: Path, seconds: float = 0.5, rate: int = 48000) -> None:
                                  for i in range(int(seconds * rate))))
 
 # How a generated sound reaches the user. The card line (``desktop_card``) is offered only after a Desktop
-# with this plugin's Desktop half on told the backend it saw the call start (``POST /card-ready``, from its
-# ``tool.start`` listener); otherwise only the ``MEDIA:`` line, which Desktop's built-in player and every
-# messaging surface play, so a Desktop with the half off never gets a card line it shows as text. The
-# length reported is the length of the audio ElevenLabs returned, next to the one requested.
+# with this plugin's Desktop half on told the backend it saw THIS call start in THIS chat (``POST
+# /card-ready`` with the event's session id, from its ``tool.start`` listener); otherwise only the
+# ``MEDIA:`` line, which Desktop's built-in player and every messaging surface play, so no surface ever
+# gets a card line it would show as text. Every doubt (unknown surface, no session id, plugin host, two
+# unnamed sightings) answers MEDIA. The length reported is the length of the audio ElevenLabs returned.
 
 
-def test_the_card_line_needs_a_desktop_that_saw_the_call_start(loaded, api, _hermes_home):
+@pytest.fixture
+def desktop(loaded):
+    """``call`` as a Desktop chat turn: the session context a Desktop turn binds (source, durable id, UI tab
+    id) and the durable id the dispatcher passes the handler."""
+    from gateway.session_context import clear_session_vars, set_session_vars
+
     _, call = loaded
+
+    def turn(args: dict, session: str = "desk-1", ui: str = "", source: str = "desktop", platform: str = "") -> dict:
+        tokens = set_session_vars(platform=platform, source=source, session_id=session, ui_session_id=ui)
+        try:
+            return call(args, session_id=session)
+        finally:
+            clear_session_vars(tokens)
+
+    return turn
+
+
+def test_the_card_line_is_for_the_call_the_desktop_saw_in_that_chat(desktop, api):
     module, client = api
     prompt = "  Rain on a tin roof 🌧️\nthen distant thunder"  # exact bytes, surrounding spaces included
+    see = lambda session="desk-1": client.post("/card-ready", json={"prompt": prompt, "session": session})
 
-    plain = call({"prompt": prompt, "duration_seconds": 2})
+    plain = desktop({"prompt": prompt, "duration_seconds": 2})
     assert plain["success"] is True and "desktop_card" not in plain  # Desktop half off / no Desktop
     assert plain["media_tag"] == f"MEDIA:{plain['file_path']}"
 
-    assert client.post("/card-ready", json={"prompt": prompt}).json() == {"ok": True}
-    carded = call({"prompt": prompt, "duration_seconds": 2})
+    assert see().json() == {"ok": True}
+    carded = desktop({"prompt": prompt, "duration_seconds": 2})
     assert carded["desktop_card"] == f'::elevenlabs-sfx{{id="{carded["sound_id"]}"}}'
     assert carded["media_tag"] == f"MEDIA:{carded['file_path']}"  # still there for the other surfaces
+    assert "desktop_card" not in desktop({"prompt": prompt, "duration_seconds": 2})  # that sighting is used up
 
-    assert "desktop_card" not in call({"prompt": "Rain on a tin roof", "duration_seconds": 2})  # other call
+    see()
+    assert "desktop_card" not in desktop({"prompt": "Rain on a tin roof", "duration_seconds": 2})  # other prompt
+    # Another chat repeating the prompt (a CLI or TUI session, a second Desktop chat) is not the call seen.
+    assert "desktop_card" not in desktop({"prompt": prompt}, session="cli-session-B", source="cli")
+    assert "desktop_card" not in desktop({"prompt": prompt}, session="desk-2")
+    assert "desktop_card" in desktop({"prompt": prompt})  # the chat it was seen in still gets it
 
+    see()
     seen = module._prov.data_dir() / module._prov.SEEN_FILE_NAME
     stale = json.loads(seen.read_text().splitlines()[-1])
     seen.write_text(json.dumps({**stale, "at": time.time() - 200}) + "\n")
-    assert "desktop_card" not in call({"prompt": prompt, "duration_seconds": 2})  # an earlier call's sighting
+    assert "desktop_card" not in desktop({"prompt": prompt, "duration_seconds": 2})  # an earlier call's sighting
 
-    client.post("/card-ready", json={"prompt": prompt})
+    see()
     assert client.delete("/card-ready").json() == {"ok": True}  # the Desktop half was switched off
-    assert "desktop_card" not in call({"prompt": prompt, "duration_seconds": 2})
+    assert "desktop_card" not in desktop({"prompt": prompt, "duration_seconds": 2})
     assert client.delete("/card-ready").json() == {"ok": True}  # nothing to forget is fine
 
 
-def test_the_card_handshake_stays_small_and_refuses_junk(loaded, api):
+def test_a_sighting_names_the_chat_by_its_ui_tab_id_on_older_hosts(desktop, api):
+    """0.22.x Desktop events carry the UI tab id, not the durable session id the handler gets; the
+    turn's session context has both."""
+    _, client = api
+    client.post("/card-ready", json={"prompt": "door knock", "session": "tab-7f3a"})
+    assert "desktop_card" not in desktop({"prompt": "door knock"}, session="20261023_120000_abcdef", ui="tab-0000")
+    assert "desktop_card" in desktop({"prompt": "door knock"}, session="20261023_120000_abcdef", ui="tab-7f3a")
+
+
+def test_an_unnamed_sighting_counts_only_when_it_is_the_only_one(desktop, api):
+    """A Desktop half from before sightings named the chat posts only the prompt: one fresh sighting
+    vouches for one call; two are ambiguous (two chats ran the prompt) and vouch for neither."""
+    _, client = api
+    client.post("/card-ready", json={"prompt": "glass tap"})
+    assert "desktop_card" in desktop({"prompt": "glass tap"})
+    assert "desktop_card" not in desktop({"prompt": "glass tap"})  # used up
+    client.post("/card-ready", json={"prompt": "glass tap", "owner": "a"})
+    client.post("/card-ready", json={"prompt": "glass tap", "owner": "b"})
+    assert "desktop_card" not in desktop({"prompt": "glass tap"})
+    assert "desktop_card" not in desktop({"prompt": "glass tap"})
+
+
+def test_an_unknown_or_messaging_surface_never_gets_the_card_line(desktop, loaded, api):
+    """A Desktop open on the same profile hears a Telegram turn's tool events too and vouches for a
+    card; the Telegram user must still get the MEDIA: line only. Same when the turn's surface or
+    session cannot be told at all."""
     _, call = loaded
+    _, client = api
+    see = lambda session="desk-1": client.post("/card-ready", json={"prompt": "door knock", "session": session})
+    see()
+    result = desktop({"prompt": "door knock"}, source="", platform="telegram")
+    assert "desktop_card" not in result and result["media_tag"].startswith("MEDIA:")
+    assert "desktop_card" not in desktop({"prompt": "door knock"}, source="")  # no surface known
+    assert "desktop_card" not in call({"prompt": "door knock"}, session_id="desk-1")  # no session context at all
+    assert "desktop_card" not in desktop({"prompt": "door knock"}, session="")  # no session id
+    assert "desktop_card" in desktop({"prompt": "door knock"}, source="", platform="local")  # the Desktop turn
+
+
+def test_inside_the_plugin_host_the_card_line_is_never_offered(desktop, api, monkeypatch):
+    """Under ``plugins.isolation: host`` the handler runs in the plugin host process, which gets none of
+    the caller's session context: a Telegram turn would read as a non-messaging one there."""
+    _, client = api
+    client.post("/card-ready", json={"prompt": "door knock", "session": "desk-1"})
+    monkeypatch.setenv("HERMES_PLUGIN_HOST_PROCESS", "1")
+    result = desktop({"prompt": "door knock"})
+    assert "desktop_card" not in result and result["media_tag"].startswith("MEDIA:")
+    monkeypatch.delenv("HERMES_PLUGIN_HOST_PROCESS")
+    assert "desktop_card" in desktop({"prompt": "door knock"})  # the same sighting, in process
+
+
+def test_switching_one_desktop_off_keeps_the_other_desktops_cards(desktop, api):
+    _, client = api
+    client.post("/card-ready", json={"prompt": "glass tap", "owner": "window-a", "session": "desk-1"})
+    client.post("/card-ready", json={"prompt": "door knock", "owner": "window-b", "session": "desk-1"})
+    assert client.delete("/card-ready?owner=window-a").json() == {"ok": True}
+    assert "desktop_card" not in desktop({"prompt": "glass tap"})
+    assert "desktop_card" in desktop({"prompt": "door knock"})
+
+
+def test_the_card_handshake_stays_small_and_refuses_junk(desktop, api):
     module, client = api
     assert client.post("/card-ready", json={"prompt": "x" * 5000}).status_code == 422
+    assert client.post("/card-ready", json={"prompt": "x", "session": "s" * 300}).status_code == 422
     assert client.post("/card-ready", json={}).status_code == 422
     for n in range(1200):
-        client.post("/card-ready", json={"prompt": f"sound {n}"})
+        client.post("/card-ready", json={"prompt": f"sound {n}", "session": "desk-1"})
     seen = module._prov.data_dir() / module._prov.SEEN_FILE_NAME
     assert seen.stat().st_size <= 64 * 1024
-    assert "desktop_card" in call({"prompt": "sound 1199"})  # the newest sightings survive the trim
-    assert "desktop_card" not in call({"prompt": "sound 3"})
+    assert "desktop_card" in desktop({"prompt": "sound 1199"})  # the newest sightings survive the trim
+    assert "desktop_card" not in desktop({"prompt": "sound 3"})
 
 
 def test_the_reported_length_is_the_returned_audio_not_the_request(loaded, api, stand_in, audio):
@@ -330,50 +415,29 @@ def test_the_reported_length_is_the_returned_audio_not_the_request(loaded, api, 
     assert auto["length_seconds"] == 2.0 and auto["requested_duration_seconds"] is None
 
 
-def test_a_messaging_turn_never_gets_the_card_line(loaded, api):
-    """A Desktop open on the same profile hears a Telegram turn's tool events too and vouches for a
-    card; the Telegram user must still get the MEDIA: line only."""
-    from gateway.session_context import clear_session_vars, set_session_vars
-
-    _, call = loaded
-    _, client = api
-    client.post("/card-ready", json={"prompt": "door knock"})
-    tokens = set_session_vars(platform="telegram", chat_id="111")
-    try:
-        result = call({"prompt": "door knock", "duration_seconds": 1})
-    finally:
-        clear_session_vars(tokens)
-    assert "desktop_card" not in result and result["media_tag"].startswith("MEDIA:")
-    assert "desktop_card" in call({"prompt": "door knock", "duration_seconds": 1})  # the Desktop turn
-
-
-def test_switching_one_desktop_off_keeps_the_other_desktops_cards(loaded, api):
-    _, call = loaded
-    _, client = api
-    client.post("/card-ready", json={"prompt": "glass tap", "owner": "window-a"})
-    client.post("/card-ready", json={"prompt": "door knock", "owner": "window-b"})
-    assert client.delete("/card-ready?owner=window-a").json() == {"ok": True}
-    assert "desktop_card" not in call({"prompt": "glass tap"})
-    assert "desktop_card" in call({"prompt": "door knock"})
-
-
-def test_sightings_writers_wait_for_each_other(loaded, api):
+def test_sightings_writers_and_the_tool_wait_for_each_other(loaded, api):
     """The plugin host serves routes on worker threads (and several processes can serve a profile): an
-    append landing between a trim's read and its replace would be lost, so every write takes the lock."""
+    append landing between a trim's read and its replace would be lost, so every write takes the lock.
+    The tool's read-and-consume takes it too (on Windows a replace fails while a reader has the file)."""
     import threading
 
     module, _ = api
     prov = module._prov
-    prov.mark_card_ready("first", "w")
+    prov.mark_card_ready("first", "w", "s")
     seen = prov.data_dir() / prov.SEEN_FILE_NAME
     before = seen.read_bytes()
-    writer = threading.Thread(target=prov.mark_card_ready, args=("second", "w"))
+    writer = threading.Thread(target=prov.mark_card_ready, args=("second", "w", "s"))
+    answers = []
+    reader = threading.Thread(target=lambda: answers.append(prov.card_ready("first", time.time() - 60, {"s"})))
     with prov._seen_lock():
         writer.start()
+        reader.start()
         writer.join(0.3)
         assert writer.is_alive() and seen.read_bytes() == before  # held off while another writer works
+        assert reader.is_alive() and answers == []  # the tool waits as well
     writer.join(5)
-    assert not writer.is_alive() and prov.card_ready("second", time.time() - 60)
+    reader.join(5)
+    assert answers == [True] and prov.card_ready("second", time.time() - 60, {"s"})
 
 
 def test_many_concurrent_sightings_stay_bounded_and_whole(loaded, api):
@@ -382,8 +446,47 @@ def test_many_concurrent_sightings_stay_bounded_and_whole(loaded, api):
     module, _ = api
     prov = module._prov
     with ThreadPoolExecutor(8) as pool:
-        list(pool.map(lambda n: prov.mark_card_ready(f"sound {n}", "w"), range(1600)))  # past the 64 KB trim
+        list(pool.map(lambda n: prov.mark_card_ready(f"sound {n}", "w", "s"), range(1600)))  # past the 64 KB trim
     seen = prov.data_dir() / prov.SEEN_FILE_NAME
     assert seen.stat().st_size <= 64 * 1024
     assert all(json.loads(line)["key"] for line in seen.read_text().splitlines())  # no torn lines
-    assert prov.card_ready("sound 1599", time.time() - 60)
+    assert prov.card_ready("sound 1599", time.time() - 60, {"s"})
+
+
+def test_marks_clears_and_reads_running_together_never_fail(loaded, api):
+    """Sightings, switch-offs and the tool's consume from many threads at once: no error, no leftover temp
+    file, every remaining line whole (on Windows this is the replace-while-open case)."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    module, _ = api
+    prov = module._prov
+
+    def work(n: int) -> None:
+        prov.mark_card_ready(f"sound {n % 20}", f"w{n % 3}", f"s{n % 4}")
+        if n % 7 == 0:
+            prov.clear_card_marks(f"w{n % 3}")
+        prov.card_ready(f"sound {n % 20}", time.time() - 60, {f"s{n % 4}"})
+
+    with ThreadPoolExecutor(8) as pool:
+        list(pool.map(work, range(600)))
+    directory = prov.data_dir()
+    assert not list(directory.glob("*.tmp"))
+    assert all(json.loads(line)["key"] for line in (directory / prov.SEEN_FILE_NAME).read_text().splitlines())
+
+
+def test_a_failed_rewrite_leaves_no_temp_file_behind(loaded, api, monkeypatch):
+    """Disk full (or a refused replace) mid-rewrite: the error reaches the caller, the half-written copy
+    does not stay in the data dir, and the tool answers MEDIA."""
+    import errno
+
+    module, client = api
+    prov = module._prov
+    prov.mark_card_ready("door knock", "w", "s")
+
+    def full(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "No space left on device")
+
+    monkeypatch.setattr(prov.os, "replace", full)
+    assert client.delete("/card-ready?owner=w").status_code == 500
+    assert prov.card_ready("door knock", time.time() - 60, {"s"}) is False
+    assert not list(prov.data_dir().glob("*.tmp"))
