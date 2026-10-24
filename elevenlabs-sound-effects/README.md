@@ -89,11 +89,11 @@ in its built-in audio player.
 
 **Sound card.** When the Desktop half is on, it tells the plugin's backend each time it sees the tool
 start, and in which chat. That one call, in that chat, then hands the agent a card line,
-`::elevenlabs-sfx{id="<sound_id>"}`, instead of the plain `MEDIA:` line, provided Hermes reports the
-turn as a Desktop turn (`ctx.session_surface()`, in Hermes 0.22.3 and newer). In every other case the
+`::elevenlabs-sfx{id="<sound_id>"}`, instead of the plain `MEDIA:` line, provided the chat was started in
+Desktop, as Hermes reports it (`ctx.session_surface()`, in Hermes 0.22.3 and newer). In every other case the
 agent gets only the `MEDIA:` line, so a sound never arrives as text you can't play: no Desktop half,
 a Hermes older than 0.22.3 (Desktop then plays the sound in its built-in player), a turn in another
-chat or on another surface (the classic CLI, the TUI, Telegram and the other messaging apps, the API
+chat or on another surface (chats started in the classic CLI or the TUI, Telegram and the other messaging apps, the API
 server, webhooks, cron, kanban), a turn whose surface Hermes can't tell, a call that waited more than
 two minutes for approval, and every call when the plugin runs in the plugin host
 (`plugins.isolation: host`). One known gap: two windows

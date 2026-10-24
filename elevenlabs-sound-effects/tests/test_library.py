@@ -369,9 +369,9 @@ def test_a_sighting_that_names_no_chat_vouches_for_nothing(desktop, api):
 @pytest.mark.parametrize("surface", ["cli", "tui", "acp", "local", "telegram", "discord", "api_server", "webhook",
                                      "msgraph_webhook", "kanban", "cron", "gateway", "desktop-ish", ""])
 def test_only_a_desktop_turn_gets_the_card_line(desktop, api, surface):
-    """A Desktop with the session open hears the tool events of every turn on it (CLI and TUI turns on a
-    shared session, Telegram, api_server and webhook turns) and vouches for a card; those surfaces must
-    still get the MEDIA: line only."""
+    """A Desktop with the session open hears the tool events of every turn on it (turns of chats started
+    in the CLI or TUI, Telegram, api_server and webhook turns) and vouches for a card; those surfaces
+    must still get the MEDIA: line only."""
     _, client = api
     client.post("/card-ready", json={"prompt": "door knock", "session": "desk-1"})
     result = desktop({"prompt": "door knock"}, surface=surface)

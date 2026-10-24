@@ -268,9 +268,10 @@ def _download(base_url: str, output_format: str, body: dict, api_key: str):
     return outcome["value"]
 
 
-# Clients whose turns a Desktop window draws, as ``ctx.session_surface()`` names them. Every other
-# surface (the classic CLI, the TUI, messaging apps, ACP, api_server, webhooks, cron, ...) gets the
-# MEDIA: line even when a Desktop has the same session open and hears its tool events.
+# Surfaces whose chats a Desktop window draws, as ``ctx.session_surface()`` names them (the surface a
+# chat was started on). Every other surface (chats started in the classic CLI or the TUI, messaging
+# apps, ACP, api_server, webhooks, cron, ...) gets the MEDIA: line even when a Desktop has the same
+# session open and hears its tool events.
 _CARD_SURFACES = frozenset({"desktop"})
 
 
