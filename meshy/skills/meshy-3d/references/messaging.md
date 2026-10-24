@@ -9,10 +9,12 @@ already resolves the active profile, so never assume `~/.hermes`. Use that absol
 ## Send the thumbnail as a photo
 
 ```bash
-curl -fsSL --create-dirs -o "<HERMES_HOME>/cache/images/meshy-<task_id>.png" "<thumbnail_url>"
+curl -fsSL --create-dirs -o "<HERMES_HOME>/cache/images/meshy-<task_id>.png" "<thumbnail_url>" &&
+  realpath "<HERMES_HOME>/cache/images/meshy-<task_id>.png"
 ```
 
-Then reply with that file on its own line:
+Then reply with the path `realpath` printed, copied verbatim, on its own line (never shorten it
+to `~/.hermes/...`):
 
 ```
 Here's the preview of your treasure chest.
@@ -21,7 +23,7 @@ MEDIA:<HERMES_HOME>/cache/images/meshy-<task_id>.png
 
 A `.png`/`.jpg` attachment goes out as a photo. `cache/images` is one of the gateway's media
 delivery folders, so this works in strict media mode too; it is a cache, so download right before
-you reply. Never `![preview](<url>)`: on a streaming gateway (Telegram's default) the image is
+you reply. Never `![preview](<url>)`: on a streaming gateway the image is
 dropped and the raw markdown stays in the message. When the download fails, the link has expired:
 `meshy_get_task_status` returns a fresh `thumbnail_url`. If it still fails, send no image rather
 than the URL.
@@ -32,7 +34,8 @@ Generation, refine, rig and animation take about 1–5 minutes, and a blocking w
 silent for all of it. On a messaging platform:
 
 1. As soon as the create returns its `task_id`, reply in one line: "Started <what> (task <id>),
-   about N min. I'll send it here when it's done."
+   about N min. I'll send it here when it's done." Do not call `meshy_get_task_status` in this
+   turn (its default `wait: true` blocks until the job ends).
 2. In the same turn, arm a wake sized to the job:
    `terminal(command="sleep 180 && echo meshy task <task_id>", background=true, notify_on_complete=true)`
    (text or image to 3D 180, refine 150, rig or animation 120, remesh or convert 60). When the

@@ -99,10 +99,14 @@ user's goal before the first paid call.
    second gate, not the first. Offer `meshy_check_balance` when the job is large.
 3. **Submit once.** Every create returns `{task_id, status}` (Creative Lab waits and returns
    the model). Keep the `task_id` and task type.
-4. **Wait** with `meshy_get_task_status` (`wait: true`, default 300 s per call). Generation
+4. **Wait.** **On a messaging platform (Telegram, Discord, Slack, WhatsApp, Signal, Matrix ...),
+   never wait inline:** `meshy_get_task_status` defaults to `wait: true`, which holds the chat for
+   the whole job. Right after the create, in the same turn: reply "Started <what> (task <id>), about
+   N min", arm the background wake and end the turn; the wake checks once with `wait: false`
+   ([messaging](references/messaging.md) § Long jobs). Elsewhere, wait with
+   `meshy_get_task_status` (`wait: true`, default 300 s per call). Generation
    usually takes 2–3 minutes. A wait that times out leaves the task running: poll the same
-   `task_id` again. **On a messaging platform, don't hold the chat:** reply "started, ~N min" and
-   arm a background wake ([messaging](references/messaging.md) § Long jobs). **On Hermes Desktop,
+   `task_id` again. **On Hermes Desktop,
    don't wait when nothing else needs the result:** right after the create, end the reply with `::meshy-model{task="<task_id>" title="<short name>"}` on its own
    line. The card shows Meshy's progress, then the model with its Next and Download menus. Wait only
    when the next step needs the finished task (a chained refine/rig, a download into the project, a
@@ -226,7 +230,7 @@ download result gave one), and that a saved file is permanent.
   other file becomes a download card.
 - **Messaging (Telegram, Discord, Slack, WhatsApp, Signal, Matrix ...):** never emit the
   `::meshy-model` line (it shows as raw text) or a markdown image (`![..](url)`): with streaming on
-  (Telegram's default) the gateway drops the image and the raw markdown stays. Every attachment
+  the gateway drops the image and the raw markdown stays. Every attachment
   is a line that is only `MEDIA:<absolute path>`. For the thumbnail, download `thumbnail_url` into
   `<HERMES_HOME>/cache/images/` first and attach that `.png`; it arrives as a photo (commands:
   [messaging](references/messaging.md)). A 3D file goes out as a document. A path in prose is not an
