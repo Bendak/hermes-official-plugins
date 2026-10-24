@@ -668,3 +668,38 @@ def test_made_from_never_shows_a_type_named_project_or_credits_the_task_itself(a
     # The first task keeps its own project prompt when Meshy's record has none, credited to no other task.
     got = api.details(preview)
     assert (got["prompt"], got["prompt_from"]) == ("a small wooden barrel", None)
+
+
+def test_a_brief_miss_on_the_owning_route_never_hides_the_finished_model(api, meshy):
+    """A generic route knows a rig task but its own (rigging) route 404s once: that read gets the generic record,
+    which lacks the files, and it is not cached, so the next poll asks the owning route again and finds them."""
+    task = meshy.add("rig", 40, result={"rigged_character_glb_url": _asset(meshy, "rig.glb")})
+    meshy.overrides = {f"/openapi/v1/rigging/{task}": (404, {}, b"{}")}
+    assert api.task_state(task)["status"] == "SUCCEEDED"
+    meshy.overrides = {}
+    assert api.task_state(task)["has_model"]
+    assert [f["format"] for f in api.formats(task)["formats"]] == ["glb"]
+    meshy.server.hits.clear()
+    api.task_state(task)  # now resolved: the owning route is cached, one call per poll
+    assert meshy.meshy_hits() == [f"/openapi/v1/rigging/{task}"]
+
+
+def test_an_outage_during_the_lookup_never_caches_no_such_task(api, meshy):
+    """The cached route loses the task while another route is down: that read is a 502 (the card retries), and
+    no "no such task" verdict survives it, so the read after recovery asks Meshy and finds the task. A lookup
+    that reads every route and finds nothing still caches its 404."""
+    task = meshy.add("image-to-3d", 41, status="IN_PROGRESS", progress=30)
+    assert api.task_state(task)["status"] == "IN_PROGRESS"
+    meshy.overrides = {f"/openapi/v1/image-to-3d/{task}": (404, {}, b"{}"),
+                       f"/openapi/v2/text-to-3d/{task}": (503, {}, b"{}")}
+    assert _status(api.task_state, task).status_code == 502
+    meshy.overrides = {}
+    meshy.server.hits.clear()
+    assert api.task_state(task)["status"] == "IN_PROGRESS"
+    assert meshy.meshy_hits()  # read from Meshy, not a cached miss
+
+    del meshy.tasks[task]  # really gone: the full lookup's 404 is remembered for the retry window
+    assert _status(api.task_state, task).status_code == 404
+    meshy.server.hits.clear()
+    assert _status(api.task_state, task).status_code == 404
+    assert meshy.meshy_hits() == []

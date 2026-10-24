@@ -41,6 +41,7 @@ import logging
 import os
 import re
 import shutil
+import stat
 import tempfile
 import threading
 import time
@@ -430,9 +431,11 @@ def _sha256(path: Path) -> str:
 
 
 def _record_asset(path: Path, task_id: str | None = None, export: bool = False) -> None:
-    """Upsert one model into the index. Only a resolved .glb/.gltf inside the allowed roots is recorded
+    """Upsert one file into the index. Only a resolved gallery model inside the allowed roots is recorded
     (the same gate /file applies), and a task id only when it is a well-formed Meshy id. ``export``: a file
-    /save just wrote in any format, recorded with the task that produced it (the gallery lists models only)."""
+    /save itself just wrote, in any format (the gallery lists models only). Only that call records the
+    ``saved`` fingerprint /save trusts to replace a file; a read (/file, the gallery) never grants or refreshes
+    it, so viewing a handmade file, or an edited export, never makes it replaceable."""
     try:
         resolved = path.resolve(strict=True)
         model = resolved.suffix.lower() in _INDEXED
@@ -455,6 +458,8 @@ def _record_asset(path: Path, task_id: str | None = None, export: bool = False) 
                 if model:
                     row["sha256"] = _sha256(resolved)
             row.update(name=resolved.name, last_opened=now, task_id=task or row.get("task_id"))
+            if export:
+                row["saved"] = {"bytes": st.st_size, "mtime_ns": st.st_mtime_ns, "task_id": task}
             rows.sort(key=lambda r: r.get("last_opened") or 0, reverse=True)
             # Models and other exports are capped apart: a run of STL saves must not push gallery models out.
             is_model = [Path(r.get("path", "")).suffix.lower() in _INDEXED for r in rows]
@@ -684,6 +689,13 @@ def _task_at(route: str, task_id: str, key: str) -> dict | None:
     return row if isinstance(row, dict) and row.get("id") == task_id else None
 
 
+def _forget(slot: tuple[str, str]) -> None:
+    """Drop a cached route that stopped answering, WITHOUT a "no such task" verdict: only a lookup that went on to
+    read every route and found none (``_remember(slot, None)``) may say that, never one an outage cut short."""
+    with _ROUTE_LOCK:
+        _ROUTE_CACHE.pop(slot, None)
+
+
 def _remember(slot: tuple[str, str], route: str | None) -> None:
     with _ROUTE_LOCK:
         if route is None:
@@ -698,13 +710,16 @@ def _remember(slot: tuple[str, str], route: str | None) -> None:
             cache.pop(next(iter(cache)))
 
 
-def _owned(row: dict, route: str, task_id: str, key: str) -> tuple[dict, str]:
-    """Re-read a task found on a generic route from its own route, which carries its files."""
+def _owned(row: dict, route: str, task_id: str, key: str) -> tuple[dict, str | None]:
+    """Re-read a task found on a generic route from its own route, which carries its files. The route is None when
+    the task's own route did not answer: the generic record lacks its files, so it serves this read but is never
+    cached, and the next read asks the own route again (a brief miss there must not hide the finished model)."""
     own = _route_for(row.get("type"))
     if own and own != route:
         owned = _task_at(own, task_id, key)
-        if owned is not None:
-            return owned, own
+        if owned is None:
+            return row, None
+        return owned, own
     return row, route
 
 
@@ -755,7 +770,7 @@ def _task_locked(slot: tuple[str, str], task_id: str, key: str) -> dict:
             raise refusal from exc
         if row is not None:
             return row
-        _remember(slot, None)  # deleted, or no longer this key's: probe again below
+        _forget(slot)  # deleted, no longer this key's, or a brief miss: probe again below
     elif missed:
         raise HTTPException(status_code=404, detail="Meshy has no finished task with that id")
     probe = [_TASK_ROUTES[t] for t in _PROBE_FIRST]
@@ -770,7 +785,8 @@ def _task_locked(slot: tuple[str, str], task_id: str, key: str) -> dict:
             continue
         if row is not None:
             row, route = _owned(row, route, task_id, key)
-            _remember(slot, route)
+            if route:
+                _remember(slot, route)
             return row
     rest = [r for r in dict.fromkeys(_TASK_ROUTES.values()) if r not in probe]
     errors = []
@@ -782,7 +798,8 @@ def _task_locked(slot: tuple[str, str], task_id: str, key: str) -> dict:
             continue
         if row is not None:
             row, route = _owned(row, route, task_id, key)
-            _remember(slot, route)
+            if route:
+                _remember(slot, route)
             return row
     # An outage (the card retries) outranks a refusal (the card stops); neither is remembered as a miss. A
     # refusal only on other routes is a plan-gated product, not this task: "no such task" as before.
@@ -837,13 +854,21 @@ def _saved_rows() -> dict[str, dict]:
 
 
 def _ours(path: Path, saved: dict[str, dict]) -> dict | None:
-    """The index row of a file Hermes saved and nobody has touched since (same size and mtime), else None."""
+    """The save-time record (``{"bytes", "mtime_ns", "task_id"}``) of a file /save wrote and nobody has touched
+    since, else None. Only /save's own write records it (``_record_asset(export=True)``): the row's read-time
+    size/mtime are gallery metadata and never vouch for a file, and a row from before this record (or one the
+    index cap dropped) is not ours either, so in doubt the save takes a new name instead of replacing a file."""
     row = saved.get(str(path))
+    mark = row.get("saved") if isinstance(row, dict) else None
+    if not isinstance(mark, dict):
+        return None
     try:
-        st = path.stat()
+        st = path.lstat()
     except OSError:
         return None
-    return row if row and row.get("bytes") == st.st_size and row.get("mtime") == int(st.st_mtime * 1000) else None
+    if not stat.S_ISREG(st.st_mode) or mark.get("bytes") != st.st_size or mark.get("mtime_ns") != st.st_mtime_ns:
+        return None
+    return mark
 
 
 def _bundle(stem: str, fmt: str) -> list[str]:
