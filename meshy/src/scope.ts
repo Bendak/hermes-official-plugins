@@ -36,9 +36,22 @@ const read = <T>(atom: AtomLike<T> | undefined): T | undefined => {
   }
 }
 
+const profileName = (p: unknown) => String(p ?? '').trim() || 'default'
+
 /** One string per (connection, profile): equal keys mean `ctx.rest` still reaches the same backend scope. */
 export function scopeKey(state: ScopeState | undefined): string {
-  return `${read(state?.connectionId) ?? ''}\n${read(state?.profile) ?? ''}`
+  return `${read(state?.connectionId) ?? ''}\n${profileName(read(state?.profile))}`
+}
+
+/** The scopeKey of the backend a gateway event came from. Desktop tags each event with its `profile`, and with its
+ *  `connectionId` only off the primary connection, so a profile tag without a connection means the primary one. An
+ *  untagged event (older Desktop) belongs to whichever scope is in front as it arrives. */
+export function eventScopeKey(origin: { profile?: string; connectionId?: string } | undefined, state: ScopeState | undefined): string {
+  if (!origin?.profile && !origin?.connectionId) {
+    return scopeKey(state)
+  }
+  const connection = origin.connectionId ?? (origin.profile ? '' : (read(state?.connectionId) ?? ''))
+  return `${connection}\n${profileName(origin.profile ?? read(state?.profile))}`
 }
 
 /** Calls `onChange` once per real profile/connection switch (not on subscribe, not on a repeated value).

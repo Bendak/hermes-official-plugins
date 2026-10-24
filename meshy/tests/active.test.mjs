@@ -3,12 +3,13 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import { ACTIVE_POLL_MS, awaitedTasks, createProgressTracker, MAX_FAILURES, startedTasks } from '../src/active.ts'
+import { eventScopeKey, scopeKey } from '../src/scope.ts'
 import { EARLY_404_MS, MAX_BACKOFF_MS } from '../src/task-poll.ts'
 
 const ID = '01a157b8-7317-7551-abc5-000000000001'
 const ID2 = '01a157b8-7317-7551-abc5-000000000002'
 
-function rig({ foreign = () => false, scope = () => '' } = {}) {
+function rig({ foreign = () => false, scope = () => '', scopeOf = () => scope() } = {}) {
   let now = 1_000_000
   let timers = []
   let seq = 0
@@ -42,7 +43,7 @@ function rig({ foreign = () => false, scope = () => '' } = {}) {
   }
   const states = []
   let idles = 0
-  const tracker = createProgressTracker(ctx, s => states.push(s), () => idles++, { clock, foreign, scope })
+  const tracker = createProgressTracker(ctx, s => states.push(s), () => idles++, { clock, foreign, scope, scopeOf })
   const flush = () => new Promise(resolve => setImmediate(resolve))
   return {
     tracker,
@@ -268,7 +269,7 @@ test('a lone task in backoff waits for its retry time instead of spinning', asyn
 
 test('a task tagged with another profile is polled once that profile is in front', async () => {
   let front = 'A'
-  const r = rig({ scope: () => front, foreign: o => !!o?.profile && o.profile !== front })
+  const r = rig({ scope: () => front, scopeOf: o => o?.profile ?? front, foreign: o => !!o?.profile && o.profile !== front })
   r.setReply(path => ({ tasks: queried(path).map(q => running(q.split(':')[1], 10)), done: [], missing: [] }))
   created(r, ID, 'text_to_3d', { profile: 'B' })
   await r.advance(5000)
@@ -291,4 +292,30 @@ test('tasks beyond the newest MAX_WATCHED are neither read nor shown', async () 
   const shown = r.states.at(-1).tasks.map(t => t.task_id)
   assert.equal(shown.length, 8)
   assert.ok(!shown.includes(ids[0]) && !shown.includes(ids[1]), 'the two oldest drop off the chip')
+})
+
+test('a task from local default is never read through a remote default, and resumes back home', async () => {
+  // Desktop tags every event with its profile and adds connectionId only off the primary connection.
+  const atom = value => ({ get: () => value.v, subscribe: () => () => undefined })
+  const conn = { v: null }
+  const state = { profile: atom({ get v() { return 'default' } }), connectionId: atom(conn) }
+  const r = rig({ scope: () => scopeKey(state), scopeOf: o => eventScopeKey(o, state) })
+  r.setReply(path => ({ tasks: queried(path).map(q => running(q.split(':')[1], 10)), done: [], missing: [] }))
+  created(r, ID, 'text_to_3d', { profile: 'default' })
+  await r.advance(1000)
+  assert.equal(r.calls.length, 1)
+  conn.v = 'homelab'
+  r.tracker.rescope()
+  await r.advance(5 * 60_000)
+  assert.equal(r.calls.length, 1, "homelab's default never reads the local task")
+  created(r, ID2, 'text_to_3d', { profile: 'default', connectionId: 'homelab' })
+  // A background chat on the local default finishes while homelab is in front: it is local's, not homelab's.
+  const ID3 = '01a157b8-7317-7551-abc5-000000000003'
+  created(r, ID3, 'text_to_3d', { profile: 'default' })
+  await r.advance(1000)
+  assert.deepEqual(queried(r.calls.at(-1)), [`text-to-3d:${ID2}`])
+  conn.v = null
+  r.tracker.rescope()
+  await r.advance(1000)
+  assert.deepEqual(queried(r.calls.at(-1)), [`text-to-3d:${ID}`, `text-to-3d:${ID3}`])
 })

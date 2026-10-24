@@ -6,7 +6,7 @@ import { test } from 'node:test'
 import { cardChat, OPEN_RETRIES, recordedChat } from '../src/chat.ts'
 import { bestForTask, canRender, openFormat, formatOf, mtlLibOf, mtlTextures, siblingPath } from '../src/formats.ts'
 import { localHeading, reconcileSelection } from '../src/gallery.ts'
-import { createLocalityTracker, localityOf, locatingOs, watchScope } from '../src/scope.ts'
+import { createLocalityTracker, eventScopeKey, localityOf, locatingOs, scopeKey, watchScope } from '../src/scope.ts'
 import { balanceLabel, createStatusStore, DEFAULT_SETTINGS } from '../src/status.ts'
 import { createTaskPoller, EARLY_404_MS, httpStatus, MAX_BACKOFF_MS, POLL_MS } from '../src/task-poll.ts'
 import { JSON_UPLOAD_MAX_BYTES, UPLOAD_MAX_BYTES, uploadModel } from '../src/upload.ts'
@@ -588,4 +588,16 @@ test('the balance chip blames the key only for a rejected key, whatever Meshy wr
   assert.equal(balanceLabel({ configured: true, error: 'Meshy API error 503', error_code: 'offline' }), 'offline')
   assert.equal(balanceLabel({ configured: false }), 'no key')
   assert.equal(balanceLabel({ configured: true, balance: 1200 }), `${(1200).toLocaleString()} cr`)
+})
+
+test("an event's scope comes from its tags; untagged events belong to the scope in front", () => {
+  const at = (profile, connectionId) => ({ profile: { get: () => profile }, connectionId: { get: () => connectionId } })
+  const local = at('default', null)
+  const remote = at('default', 'homelab')
+  assert.equal(eventScopeKey({ profile: 'default' }, remote), scopeKey(local), 'no connection tag = the primary connection')
+  assert.notEqual(eventScopeKey({ profile: 'default' }, remote), scopeKey(remote))
+  assert.equal(eventScopeKey({ profile: 'default', connectionId: 'homelab' }, local), scopeKey(remote))
+  assert.equal(eventScopeKey({}, remote), scopeKey(remote))
+  assert.equal(eventScopeKey({ profile: ' ' }, at('', null)), scopeKey(at(undefined, null)), "a blank profile is 'default'")
+  assert.equal(eventScopeKey({ connectionId: 'homelab' }, at('work', null)), scopeKey(at('work', 'homelab')))
 })

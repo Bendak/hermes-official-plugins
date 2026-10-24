@@ -16,8 +16,8 @@
  * backoff (3 s → 60 s) while the other tasks keep their pace. The whole poll backs off when the backend itself
  * fails, and stops on a permanent failure (a refused key) or after MAX_FAILURES in a row; the next Meshy tool call
  * re-arms it. A task is polled only while the profile/connection that owns it is in front (ctx.rest reaches the front
- * one, and another one's key does not own it): the event's tag says which, and an untagged event (the primary path)
- * belongs to the one that was in front when it arrived. Switching back resumes them.
+ * one, and another one's key does not own it): the event's tags say which (scope.ts eventScopeKey), and an untagged
+ * event belongs to the one in front when it arrived. Switching back resumes them.
  *
  * Meshy tools sit behind tool search, so a call usually arrives as `tool_call` with `args.calls[].name =
  * mcp_meshy_*`, not as a top-level `mcp_meshy_*` name; both are recognised.
@@ -202,9 +202,9 @@ interface Watched {
   created: boolean
   since: number
   origin?: EventOrigin
-  /** For an untagged event (the primary path), scopeKey of the profile/connection in front when it arrived: the
-   *  one whose key owns the task. A tagged event leaves it unset, and `foreign(origin)` decides from the tag. */
-  scope?: string
+  /** scopeKey of the profile/connection the event came from (its tags; the front one for an untagged event): the
+   *  one whose key owns the task. */
+  scope: string
   /** Failed reads of this task in a row, and when to read it again. */
   fails: number
   retryAt: number
@@ -227,15 +227,17 @@ export interface TrackerOptions {
   clock?: PollClock
   /** True when an event's origin is another profile/connection than the one ctx.rest reaches now. */
   foreign?: (origin?: EventOrigin) => boolean
-  /** The profile/connection ctx.rest reaches now (scope.ts scopeKey); events carry no tag on the primary path. */
+  /** The profile/connection ctx.rest reaches now (scope.ts scopeKey). */
   scope?: () => string
+  /** The same key for the profile/connection an event came from (scope.ts eventScopeKey). */
+  scopeOf?: (origin: EventOrigin) => string
 }
 
 export function createProgressTracker(
   ctx: ActiveCtx,
   onChange: (s: ProgressState) => void,
   onIdle: () => void,
-  { clock = realClock, foreign = () => false, scope = () => '' }: TrackerOptions = {}
+  { clock = realClock, foreign = () => false, scope = () => '', scopeOf = () => scope() }: TrackerOptions = {}
 ) {
   let state: ProgressState = { running: false, tasks: [], live: null }
   const runningIds = new Set<string>()
@@ -265,7 +267,7 @@ export function createProgressTracker(
       }
     }
     const front = scope()
-    return [...watched].filter(([, w]) => (w.scope === undefined || w.scope === front) && !foreign(w.origin))
+    return [...watched].filter(([, w]) => w.scope === front && !foreign(w.origin))
   }
 
   const schedule = (delay: number) => {
@@ -373,7 +375,7 @@ export function createProgressTracker(
         created: created || Boolean(known?.created),
         since: known?.since ?? clock.now(),
         origin,
-        scope: origin.profile || origin.connectionId ? undefined : scope(),
+        scope: scopeOf(origin),
         fails: 0,
         retryAt: 0
       })

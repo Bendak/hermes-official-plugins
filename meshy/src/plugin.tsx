@@ -20,7 +20,7 @@ import { PICKABLE_EXTENSIONS } from './formats.ts'
 import { createProgressTracker, isMeshyCall, type ProgressState } from './active.ts'
 import { ProgressChip } from './progress.tsx'
 import { createProvenanceWriter, creationsFrom, isForeignOrigin } from './provenance.ts'
-import { createLocalityTracker, type Locality, locatingOs, scopeKey, watchScope } from './scope.ts'
+import { createLocalityTracker, eventScopeKey, type Locality, locatingOs, scopeKey, watchScope } from './scope.ts'
 import { type Balance, createStatusStore, type MeshySettings } from './status.ts'
 import { uploadModel } from './upload.ts'
 import { BalanceChip, errorText, Gallery, type Source, TranscriptCard } from './views.tsx'
@@ -153,7 +153,8 @@ const plugin: HermesPlugin = {
     // A finished task changes the balance (credits are charged at creation, refunded on failure).
     const progress = createProgressTracker(ctx, s => progressListeners.forEach(fn => fn(s)), refreshBalance, {
       foreign: isForeignOrigin,
-      scope: () => scopeKey(host.state)
+      scope: () => scopeKey(host.state),
+      scopeOf: origin => eventScopeKey(origin, host.state)
     })
 
     function Chip() {
