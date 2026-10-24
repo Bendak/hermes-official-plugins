@@ -84,7 +84,6 @@ test('a Desktop with the seam gets a sound-card renderer for this plugin\u2019s 
   assert.equal(card.props.id, 'abcdef012345')
   assert.equal(card.props.sessionId, 's-1') // Next actions go to the chat that shows the card
   assert.equal(card.props.fallback, 'BUILT-IN PLAYER') // shown whenever the card can't play the sound
-  assert.equal(typeof card.props.resolveUrl, 'function') // plays from the backend that owns the chat
   // Nothing it can't draw as a sound card loses the built-in player.
   for (const over of [{ result: { success: false, error: 'HTTP 400' } }, { file: { ...media().file, name: 'voice.mp3' }, result: null }, { file: { ...media().file, kind: 'video' } }]) {
     assert.equal(pick(renderers[0].data.render(media(over))).props.children, 'BUILT-IN PLAYER')

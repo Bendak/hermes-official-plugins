@@ -102,7 +102,7 @@ type Loaded = { state: 'idle' } | { state: 'loading' } | { state: 'error'; messa
  * Loads (once) and plays one sound. Decoded audio comes from a small shared cache (`loadSound`); nothing polls. While it
  * plays, one animation frame per paint advances the progress bar, and the loop stops when playback does.
  */
-export function useSound(ctx: PluginContext, rec: null | SoundRecord, ownerPrefix: string, resolveUrl?: () => Promise<string>) {
+export function useSound(ctx: PluginContext, rec: null | SoundRecord, ownerPrefix: string) {
   // One owner per mount: two cards for the same sound must not stop each other on unmount.
   const owner = `${ownerPrefix}:${useId()}`
   const [loaded, setLoaded] = useState<Loaded>({ state: 'idle' })
@@ -137,7 +137,7 @@ export function useSound(ctx: PluginContext, rec: null | SoundRecord, ownerPrefi
     if (!rec || !rec.exists) return null
     setLoaded({ state: 'loading' })
     try {
-      const { buffer, wave } = await loadSound(ctx, rec.id, resolveUrl)
+      const { buffer, wave } = await loadSound(ctx, rec.id)
       if (alive.current) setLoaded({ state: 'ready', buffer, wave })
       return buffer
     } catch (err) {

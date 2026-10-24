@@ -36,23 +36,13 @@ export interface DecodedSound {
 // for 30 s of 44.1 kHz stereo, so the bound stays small).
 const decoded = new PromiseCache<DecodedSound>(6)
 
-/**
- * Sound `id`, decoded, with waveform peaks. `resolveUrl` (a tool-media card's `file.resolveUrl`) streams
- * the file from the backend that owns the chat; without it, or when it fails, the bytes come from this
- * plugin's backend on the active connection.
- */
-export function loadSound(ctx: PluginContext, id: string, resolveUrl?: () => Promise<string>): Promise<DecodedSound> {
+/** Original bytes of sound `id` from the active backend, decoded, with waveform peaks. (The seam's
+ *  `file.resolveUrl()` is a media-element URL: Desktop's `hermes-media:` scheme refuses `fetch`, so it
+ *  can't feed Web Audio, which the gapless loop audition needs.) */
+export function loadSound(ctx: PluginContext, id: string): Promise<DecodedSound> {
   const scope = currentScope()
   return decoded.get(`${scope.connection}\u0000${scope.profile}\u0000${id}`, async () => {
-    let buffer: AudioBuffer | null = null
-    if (resolveUrl) {
-      try {
-        buffer = await decode(await resolveUrl())
-      } catch {
-        buffer = null
-      }
-    }
-    buffer ??= await decode((await fetchAudio(ctx, id, 'original')).data_url)
+    const buffer = await decode((await fetchAudio(ctx, id, 'original')).data_url)
     return { buffer, wave: peaks(buffer) }
   })
 }

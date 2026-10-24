@@ -39,7 +39,6 @@ export function ToolMediaSoundCard({
       fallback={media.fallback}
       id={id}
       onOpenLibrary={onOpenLibrary}
-      resolveUrl={typeof media.file?.resolveUrl === 'function' ? media.file.resolveUrl : undefined}
       sessionId={media.sessionId}
       source=""
       streaming={false}
@@ -54,8 +53,7 @@ export function SoundCard({
   streaming,
   source,
   onOpenLibrary,
-  fallback,
-  resolveUrl
+  fallback
 }: {
   ctx: PluginContext
   id: string
@@ -65,8 +63,6 @@ export function SoundCard({
   onOpenLibrary: () => void
   /** Tool-media cards: Desktop's built-in player, shown whenever this card can't play the sound. */
   fallback?: ReactNode
-  /** Tool-media cards: the file's URL from the backend that owns the chat. */
-  resolveUrl?: () => Promise<string>
 }) {
   const valid = SOUND_ID.test(id)
   const [state, setState] = useState<State>({ kind: 'loading' })
@@ -133,7 +129,6 @@ export function SoundCard({
       onOpenLibrary={onOpenLibrary}
       rec={state.rec}
       remote={remote}
-      resolveUrl={resolveUrl}
       sessionId={sessionId}
     />
   )
@@ -146,8 +141,7 @@ function ReadyCard({
   remote,
   sessionId,
   onOpenLibrary,
-  fallback,
-  resolveUrl
+  fallback
 }: {
   ctx: PluginContext
   rec: SoundRecord
@@ -156,9 +150,8 @@ function ReadyCard({
   sessionId: null | string | undefined
   onOpenLibrary: () => void
   fallback?: ReactNode
-  resolveUrl?: () => Promise<string>
 }) {
-  const sound = useSound(ctx, rec, `card:${rec.id}`, resolveUrl)
+  const sound = useSound(ctx, rec, `card:${rec.id}`)
   useEffect(() => {
     if (rec.exists && (rec.size ?? 0) <= AUTO_LOAD_BYTES) void sound.load()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per record
