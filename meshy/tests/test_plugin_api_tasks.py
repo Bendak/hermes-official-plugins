@@ -671,11 +671,16 @@ def test_made_from_never_shows_a_type_named_project_or_credits_the_task_itself(a
 
 
 def test_a_brief_miss_on_the_owning_route_never_hides_the_finished_model(api, meshy):
-    """A generic route knows a rig task but its own (rigging) route 404s once: that read gets the generic record,
-    which lacks the files, and it is not cached, so the next poll asks the owning route again and finds them."""
+    """A generic route knows a rig task but its own (rigging) route 404s once: the generic record lacks the files,
+    so it is never cached, and the next poll asks the owning route again and finds them."""
     task = meshy.add("rig", 40, result={"rigged_character_glb_url": _asset(meshy, "rig.glb")})
     meshy.overrides = {f"/openapi/v1/rigging/{task}": (404, {}, b"{}")}
-    assert api.task_state(task)["status"] == "SUCCEEDED"
+    # Finished, files unknown: a 502 the card retries, never a final "SUCCEEDED, no model" that ends its polling.
+    assert _status(api.task_state, task).status_code == 502
+    assert _status(api.formats, task).status_code == 502
+    running = meshy.add("rig", 42, status="IN_PROGRESS", progress=50)
+    meshy.overrides[f"/openapi/v1/rigging/{running}"] = (404, {}, b"{}")
+    assert api.task_state(running)["progress"] == 50  # a running task's progress needs no files
     meshy.overrides = {}
     assert api.task_state(task)["has_model"]
     assert [f["format"] for f in api.formats(task)["formats"]] == ["glb"]
