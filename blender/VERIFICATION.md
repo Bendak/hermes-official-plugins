@@ -60,6 +60,6 @@ The macOS (`.dmg` into `~/Applications`) and Windows (`.zip` into `%LOCALAPPDATA
 - The first uv download/build took several minutes. README preparation avoids relying on a short MCP discovery deadline.
 - MCP serverInfo reported `1.30.0`; the server source is identified by the immutable Git revision above, not that advertised string.
 - `plugin.json` declares no application requirement, so installing the plugin never depends on Blender being present; the skill checks for Blender 5.1+ when a task needs it.
-- Blender is located by the skill, not at install time. Places it does not look: a custom folder picked in the Windows MSI, the Microsoft Store package, a Steam library outside the default one, and a Linux tarball outside `~/.local/opt` that is not on `PATH`; there it offers a fresh install, and the user can name the existing path instead.
+- Blender is located by the skill, not at install time. Places it does not look: a custom folder picked in the Windows MSI that is not on `PATH`, a Steam library outside the default one, and a Linux tarball outside `~/.local/opt` that is not on `PATH`; there it offers a fresh install, and the user can name the existing path instead. The Microsoft Store lookup (`Get-AppxPackage`) is not yet run on a real machine.
 
 Machine-specific raw logs and remote harnesses are retained privately and excluded from this repository.
