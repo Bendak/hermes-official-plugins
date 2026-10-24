@@ -17,8 +17,9 @@ import { host, PALETTE_AREA, STATUSBAR_AREAS, TRANSCRIPT_DIRECTIVE_AREA } from '
 import { useEffect, useState } from 'react'
 
 import { PICKABLE_EXTENSIONS } from './formats.ts'
-import { createProgressTracker, isMeshyCall, ProgressChip, type ProgressState } from './progress.tsx'
-import { createProvenanceWriter, creationsFrom } from './provenance.ts'
+import { createProgressTracker, isMeshyCall, type ProgressState } from './active.ts'
+import { ProgressChip } from './progress.tsx'
+import { createProvenanceWriter, creationsFrom, isForeignOrigin } from './provenance.ts'
 import { createLocalityTracker, type Locality, locatingOs, scopeKey, watchScope } from './scope.ts'
 import { type Balance, createStatusStore, type MeshySettings } from './status.ts'
 import { uploadModel } from './upload.ts'
@@ -62,6 +63,7 @@ const plugin: HermesPlugin = {
         pendingSource = null
         galleryListeners.forEach(fn => fn(null))
         scopeListeners.forEach(fn => fn(key))
+        progress.rescope()
       })
     )
     void locality.refresh()
@@ -149,7 +151,9 @@ const plugin: HermesPlugin = {
 
     const progressListeners = new Set<(s: ProgressState) => void>()
     // A finished task changes the balance (credits are charged at creation, refunded on failure).
-    const progress = createProgressTracker(ctx, s => progressListeners.forEach(fn => fn(s)), refreshBalance)
+    const progress = createProgressTracker(ctx, s => progressListeners.forEach(fn => fn(s)), refreshBalance, {
+      foreign: isForeignOrigin
+    })
 
     function Chip() {
       const prefs = useSettings()

@@ -21,7 +21,8 @@ Routes:
     POST /save              {task, format, beside?}: download one format next to ``beside`` (no credits)
     GET /task?task=         one task's status + progress % + thumbnail, for a card given only a task id: it shows
                             progress while Meshy works and the model once it is done (the agent need not wait)
-    GET /active             Meshy tasks still PENDING/IN_PROGRESS with their progress % (progress chip)
+    GET /active?tasks=      progress % of the named in-flight tasks (``kind:id,...``; progress chip): one Meshy
+                            read per task, none when the chip watches nothing
     GET /actions?task=      the follow-up actions a finished task supports (texture, remesh, rig ...), each with
                             its credit cost and the chat message a card button sends; plus the live balance
     POST /provenance        {task_id, tool, args, session_id?}: remember what made a task (Desktop records it
@@ -167,7 +168,9 @@ def _meshy_get(path: str, key: str, timeout: float = 15.0):
 
 def _meshy_error(exc: Exception) -> HTTPException:
     if isinstance(exc, urllib.error.HTTPError):
-        detail = "Meshy rejected the API key" if exc.code in (401, 403) else f"Meshy API error {exc.code}"
+        # 401 is the key; 403 is an IP allowlist, org IP filtering or a plan-gated route, and Meshy's body says which.
+        detail = {401: "Meshy rejected the API key"}.get(exc.code) or (
+            f"Meshy refused the request: {_meshy_message(exc)}" if exc.code == 403 else f"Meshy API error {exc.code}")
         return HTTPException(status_code=502, detail=detail)
     return HTTPException(status_code=502, detail="Meshy API unreachable")
 
@@ -999,50 +1002,66 @@ def task_state(task: str):
     }
 
 
-# In-flight tasks for the Desktop progress chip. Meshy's list endpoints return status + progress per
-# task; the chip polls this only while a Meshy tool runs or a task is still in flight.
+# In-flight tasks for the Desktop progress chip. The renderer names the tasks it saw this profile's tools start
+# (``kind:id``, kind = a ``_TASK_ROUTES`` name or a record ``type``), so a poll costs one Meshy read per running task
+# and nothing when none runs. Listing every route instead cost 17 calls per 4 s poll (Meshy allows 20/s per key).
 _ACTIVE_STATUSES = ("PENDING", "IN_PROGRESS")
-# Every type the plugin's tools create except Creative Lab: meshy_creative_lab waits for its own stages and
-# reports progress itself, and its 17 per-stage list routes per poll would crowd Meshy's 20 requests/s.
-_ACTIVE_ENDPOINTS = tuple((t, r) for t, r in _TASK_ROUTES.items() if not t.startswith("creative-lab-"))
-# A task queued longer than this is Meshy's problem, not a progress bar's (Meshy advises 60 min max).
-_ACTIVE_MAX_AGE_MS = 60 * 60 * 1000
+_ACTIVE_MAX = 8
+_ACTIVE_ITEM = re.compile(r"([a-z0-9-]{1,48}):([0-9a-f][0-9a-f-]{15,63})")
 
 
-def _active_rows(task_type: str, path: str, key: str) -> list[dict]:
+def _active_wanted(tasks: str) -> list[tuple[str, str]]:
+    wanted: dict[str, str] = {}
+    for item in filter(None, (part.strip() for part in tasks.split(","))):
+        m = _ACTIVE_ITEM.fullmatch(item)
+        if not m or not (m.group(1) == "any" or _route_for(m.group(1))):
+            raise HTTPException(status_code=400, detail="tasks must be kind:task_id pairs")
+        wanted.setdefault(m.group(2), m.group(1))
+    if len(wanted) > _ACTIVE_MAX:
+        raise HTTPException(status_code=400, detail=f"at most {_ACTIVE_MAX} tasks")
+    return [(kind, task_id) for task_id, kind in wanted.items()]
+
+
+def _active_read(kind: str, task_id: str, key: str) -> dict | None:
+    """The task from its own route; "any" (a status call that named no type) uses the cached lookup instead."""
+    if kind != "any":
+        return _task_at(_route_for(kind), task_id, key)
     try:
-        rows = _meshy_get(f"{path}?page_size=5&sort_by=-created_at", key, timeout=8.0)
-    except (urllib.error.URLError, OSError, ValueError):
-        return []  # one endpoint failing never hides the others
-    now_ms = time.time() * 1000
-    out = []
-    for row in rows if isinstance(rows, list) else []:
-        if not isinstance(row, dict) or row.get("status") not in _ACTIVE_STATUSES:
-            continue
-        created = row.get("created_at") or 0
-        if isinstance(created, (int, float)) and created and now_ms - created > _ACTIVE_MAX_AGE_MS:
-            continue
-        stage = str(row.get("mode") or row.get("type") or task_type)
-        own = _TYPE_ENDPOINT.get(str(row.get("type") or ""), str(row.get("type") or ""))
-        out.append({"task_id": row.get("id"), "task_type": own if own in _TASK_ROUTES else task_type, "stage": stage,
-                    "status": row.get("status"), "progress": _as_int(row.get("progress")),
-                    "prompt": str(row.get("prompt") or "")[:120], "created_at": created})
-    return out
+        return _task(task_id, key)
+    except HTTPException as exc:
+        if exc.status_code == 404:
+            return None
+        raise
+
+
+def _active_row(kind: str, task_id: str, row: dict) -> dict:
+    return {"task_id": task_id, "task_type": _TYPE_ENDPOINT.get(kind, kind), "status": str(row.get("status") or ""),
+            "stage": str(row.get("mode") or row.get("type") or kind), "progress": _as_int(row.get("progress")),
+            "prompt": str(row.get("prompt") or "")[:120], "created_at": row.get("created_at") or 0}
 
 
 @router.get("/active")
-def active():
-    """Meshy tasks still PENDING / IN_PROGRESS (newest first), with Meshy's own progress %."""
+def active(tasks: str = ""):
+    """Status and Meshy's progress % of the named tasks (``kind:id,...``): ``tasks`` holds the ones still PENDING /
+    IN_PROGRESS (newest first), ``done`` the ids that reached any other status, ``missing`` the ids the task's own
+    route does not know (yet). One read per task on its own route; a refused key or an outage fails the request."""
     key = _api_key()
     if not key:
-        return {"configured": False, "tasks": []}
-    with ThreadPoolExecutor(max_workers=8) as pool:
-        batches = list(pool.map(lambda e: _active_rows(e[0], e[1], key), _ACTIVE_ENDPOINTS))
-    # Some list routes also return sibling types (text-to-image lists image-to-image tasks): one row per task.
-    unique = {t["task_id"]: t for b in batches for t in b if isinstance(t.get("task_id"), str)}
-    tasks = sorted(unique.values(), key=lambda t: t["created_at"] if isinstance(t["created_at"], (int, float)) else 0,
-                   reverse=True)
-    return {"configured": True, "tasks": tasks}
+        return {"configured": False, "tasks": [], "done": [], "missing": []}
+    wanted = _active_wanted(tasks)
+    running, done, missing = [], [], []
+    for (kind, task_id), found in zip(wanted, _fan_out(lambda w: _active_read(*w, key), wanted)):
+        row = found.result()  # HTTPException (403 refused key, 502 outage) reaches the chip, which stops or backs off
+        if row is not None and kind == "any":
+            kind = _TYPE_ENDPOINT.get(str(row.get("type") or ""), str(row.get("type") or "any"))
+        if row is None:
+            missing.append(task_id)
+        elif row.get("status") in _ACTIVE_STATUSES:
+            running.append(_active_row(kind, task_id, row))
+        else:
+            done.append(task_id)
+    running.sort(key=lambda t: t["created_at"] if isinstance(t["created_at"], (int, float)) else 0, reverse=True)
+    return {"configured": True, "tasks": running, "done": done, "missing": missing}
 
 
 # Card buttons. Each one SENDS A CHAT MESSAGE (the agent runs the tool behind Hermes' approval card); the

@@ -262,7 +262,7 @@ def test_progress_chip_and_gallery_cover_post_processing_and_creative_lab(api, m
     import time
     for t in (running, queued):
         meshy.tasks[t]["created_at"] = int(time.time() * 1000)
-    active = api.active()["tasks"]
+    active = api.active(tasks=f"print-repair:{running},convert:{queued}")["tasks"]
     assert sorted((t["task_id"], t["task_type"]) for t in active) == [(running, "print-repair"), (queued, "convert")]
 
     converted = meshy.add("convert", 22, model_urls={"glb": _asset(meshy, "c.glb")})
@@ -412,3 +412,45 @@ def test_a_plan_gated_route_never_turns_an_unknown_task_into_a_refusal(api, mesh
     meshy.server.hits.clear()
     assert _status(api.task_state, unknown).status_code == 404
     assert meshy.meshy_hits() == []
+
+
+def test_progress_chip_reads_only_the_tasks_it_names(api, meshy):
+    """One Meshy read per named task on its own route, none when the chip watches nothing (was 17 list calls)."""
+    running = meshy.add("text-to-3d-preview", 30, status="IN_PROGRESS", progress=40, prompt="duck")
+    done = meshy.add("rig", 31)
+    rigged = meshy.add("rig", 32, status="PENDING", progress=0)
+    assert api.active() == {"configured": True, "tasks": [], "done": [], "missing": []}
+    assert meshy.meshy_hits() == []
+
+    got = api.active(tasks=f"text-to-3d:{running},rigging:{done},any:{rigged},remesh:{_tid(33)}")
+    assert [(t["task_id"], t["task_type"], t["progress"]) for t in got["tasks"]] == [
+        (rigged, "rigging", 0), (running, "text-to-3d", 40)]
+    assert (got["done"], got["missing"]) == ([done], [_tid(33)])
+    hits = meshy.meshy_hits()
+    assert f"/openapi/v2/text-to-3d/{running}" in hits and f"/openapi/v1/rigging/{done}" in hits
+    assert not any("page_size" in h or h.rstrip("/").endswith(("text-to-3d", "rigging")) for h in hits)
+    meshy.server.hits.clear()
+    api.active(tasks=f"text-to-3d:{running},any:{rigged}")
+    assert len(meshy.meshy_hits()) == 2  # the "any" task's route is cached after its first read
+
+
+@pytest.mark.parametrize("tasks", ["text-to-3d", f"nope:{_tid(1)}", f"text-to-3d:{_tid(1)}/../balance", "any:../../v1/balance",
+                                   ",".join(f"text-to-3d:{_tid(i)}" for i in range(9))])
+def test_progress_chip_input_is_checked_before_any_meshy_call(api, meshy, tasks):
+    assert _status(api.active, tasks=tasks).status_code == 400
+    assert meshy.meshy_hits() == []
+
+
+def test_progress_chip_stops_on_a_refused_key_and_retries_an_outage(api, meshy):
+    task = meshy.add("text-to-3d-preview", 34, status="IN_PROGRESS", progress=10)
+    meshy.overrides = {f"/openapi/v2/text-to-3d/{task}": (401, {}, b"{}")}
+    assert _status(api.active, tasks=f"text-to-3d:{task}").status_code == 403  # permanent: the chip stops
+    meshy.overrides = {f"/openapi/v2/text-to-3d/{task}": (503, {}, b"{}")}
+    assert _status(api.active, tasks=f"text-to-3d:{task}").status_code == 502  # transient: it backs off
+
+
+def test_status_names_a_403_refusal_instead_of_blaming_the_key(api, meshy):
+    meshy.overrides = {"/openapi/v1/balance": (403, {}, b'{"message": "ip_not_authorized: 203.0.113.9"}')}
+    assert api.status()["error"] == "Meshy refused the request: ip_not_authorized: 203.0.113.9"
+    meshy.overrides = {"/openapi/v1/balance": (401, {}, b"{}")}
+    assert api.status()["error"] == "Meshy rejected the API key"

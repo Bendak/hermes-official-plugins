@@ -300,7 +300,14 @@ export function ModelViewer({
       return
     }
     const bg = getComputedStyle(el).getPropertyValue('--meshy-stage-bg').trim() || '#1b1d22'
-    const stage = createStage(el, bg)
+    let stage: Stage
+    try {
+      stage = createStage(el, bg)
+    } catch {
+      // No WebGL in this window (GPU blocklisted or disabled): say so here instead of failing the whole card.
+      setState({ phase: 'error', message: 'This window has no WebGL, so the 3D preview cannot run. Download or open the file instead.' })
+      return
+    }
     stageRef.current = stage
     // A new model gets a new stage: carry the toolbar's current view settings over to it.
     stage.setAutoRotate(spin)
@@ -1143,7 +1150,7 @@ export function Gallery({
                   <span style={V.ellipsis}>{m.prompt || m.task_type}</span>
                   <small style={V.itemSub}>
                     {m.task_type}
-                    {typeof m.credits === 'number' ? ` · ${m.credits} credits` : ''} · {new Date(m.created_at).toLocaleDateString()}
+                    {typeof m.credits === 'number' ? ` · ${m.credits} ${m.credits === 1 ? 'credit' : 'credits'}` : ''} · {new Date(m.created_at).toLocaleDateString()}
                     {m.expired ? m.local_path ? ' · Local copy' : ' · Expired' : ''}
                   </small>
                 </span>
@@ -1211,7 +1218,9 @@ export function BalanceChip({ balance, onOpen }: { balance: Balance | null; onOp
     : balance.error
       ? /rejected/i.test(balance.error)
         ? 'key rejected'
-        : 'offline'
+        : /refused/i.test(balance.error)
+          ? 'refused'
+          : 'offline'
       : `${(balance.balance ?? 0).toLocaleString()} cr`
   return (
     <button
