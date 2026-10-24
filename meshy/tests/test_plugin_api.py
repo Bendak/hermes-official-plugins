@@ -513,3 +513,49 @@ def test_a_beside_export_is_reused_only_for_the_task_that_saved_it(api, monkeypa
     obj = Path(api.save({"task": new, "format": "obj", "beside": str(tank)})["path"])
     assert tank.with_suffix(".mtl").read_text(encoding="utf-8") == "USER MTL" and obj.name == f"tank-{new[-8:]}.obj"
     assert obj.with_suffix(".mtl").read_text(encoding="utf-8") == "newmtl material\n"
+
+
+def test_viewing_a_file_never_makes_it_replaceable(api, monkeypatch):
+    """Only /save's own write lets a later save replace a file beside the project. Opening a handmade STL, or
+    reopening an export the user edited, in the viewer (/file, with or without a task) must never vouch for it:
+    the next save beside the same model takes a task-suffixed name instead. An untouched save viewed since is
+    still this task's file (reused, not duplicated), and an index row without a save-time record is not."""
+    other, task = "01a15976-d838-7532-99d8-000000000051", _TASK
+    a = "https://assets.meshy.ai/"
+    rows = {t: {"id": t, "model_urls": {"stl": a + f"{t[-2:]}.stl"}} for t in (other, task)}
+    monkeypatch.setattr(api, "_task", lambda t, _k: rows[t])
+    hits = _fake_assets(monkeypatch, api, {"51.stl": b"OTHER TASK STL", "6c.stl": b"THIS TASK STL"})
+    anchor = Path.home() / "projects" / "bot" / "robot.glb"
+    anchor.parent.mkdir(parents=True)
+    anchor.write_bytes(b"glTF")
+
+    handmade = anchor.with_suffix(".stl")
+    handmade.write_bytes(b"HANDMADE STL")
+    api.file(str(handmade))
+    api.file(str(handmade), task=task)
+    assert {"format": "stl", "saved": None} in api.formats(task, beside=str(anchor))["formats"]
+    first = Path(api.save({"task": task, "format": "stl", "beside": str(anchor)})["path"])
+    assert handmade.read_bytes() == b"HANDMADE STL" and first.name == f"robot-{task[-8:]}.stl"
+
+    # This task's untouched save, viewed since, is still its own: reused, never downloaded twice.
+    api.file(str(first), task=task)
+    assert Path(api.save({"task": task, "format": "stl", "beside": str(anchor)})["path"]) == first
+    assert hits["6c.stl"] == 1
+    # Edited, then reopened in the viewer: another task's save beside the project keeps the edit.
+    first.write_bytes(b"USER EDITED THE EXPORT")
+    api.file(str(first), task=task)
+    api.file(str(first))
+    second = Path(api.save({"task": other, "format": "stl", "beside": str(anchor)})["path"])
+    assert first.read_bytes() == b"USER EDITED THE EXPORT" and second.name == f"robot-{other[-8:]}.stl"
+    assert hits["6c.stl"] == 1
+
+    # An index row with only read-time size/mtime (an older index, or a gallery read) vouches for nothing.
+    legacy = anchor.with_name("tank.stl")
+    legacy.write_bytes(b"USER TANK")
+    st = legacy.stat()
+    api._write_json(api._index_path(), [*api._load_index(), {"path": str(legacy.resolve()), "bytes": st.st_size,
+                                                             "mtime": int(st.st_mtime * 1000), "task_id": other}])
+    tank = anchor.with_name("tank.glb")
+    tank.write_bytes(b"glTF-tank")
+    saved = Path(api.save({"task": other, "format": "stl", "beside": str(tank)})["path"])
+    assert legacy.read_bytes() == b"USER TANK" and saved.name == f"tank-{other[-8:]}.stl"
