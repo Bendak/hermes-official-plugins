@@ -107,6 +107,22 @@ export function matchesKind(filter: 'all' | 'image' | 'model', kind: 'image' | '
   return filter === 'all' || filter === kind
 }
 
+/** A product route `/models` could not list this time (plan-gated, or that route's outage); the rest still list. */
+export interface ListFailure {
+  task_type: string
+  error: string
+}
+
+/** One notice line per distinct reason, naming the products it hid; none when every product listed. */
+export function listFailureNotices(failed: unknown): string[] {
+  const byReason = new Map<string, string[]>()
+  for (const f of Array.isArray(failed) ? (failed as Partial<ListFailure>[]) : []) {
+    if (typeof f?.task_type !== 'string' || typeof f.error !== 'string') continue
+    byReason.set(f.error, [...(byReason.get(f.error) ?? []), f.task_type])
+  }
+  return [...byReason].map(([reason, types]) => `Couldn't list ${types.join(', ')}: ${reason}`)
+}
+
 export interface StorageStatus {
   bytes: number
   files: number

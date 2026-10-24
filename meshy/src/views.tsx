@@ -26,6 +26,7 @@ import { TaskCard } from './task-card.tsx'
 import {
   bestLocalForTask,
   imageNextActions,
+  listFailureNotices,
   localHeading,
   matchesKind,
   reconcileSelection,
@@ -798,6 +799,8 @@ interface Details {
   children: Array<{ task_id: string; tool: null | string }>
   session_id: null | string
   recorded: boolean
+  /** Why Meshy's own record is missing (outage, plan-gated route): the recorded fields still show. */
+  remote_error?: null | string
 }
 
 const STEP: Record<string, string> = {
@@ -889,6 +892,11 @@ export function MadeFrom({
           </Button>
         )}
       </div>
+      {d.remote_error && (
+        <div data-meshy-details-notice style={V.itemSub}>
+          Meshy's record isn't available ({d.remote_error}); showing what this Desktop recorded.
+        </div>
+      )}
       {main ? (
         <div style={V.promptRow}>
           <div data-meshy-prompt style={V.prompt}>
@@ -978,6 +986,7 @@ export function Gallery({
   const [local, setLocal] = useState<LocalFile[] | null>(null)
   const [storage, setStorage] = useState<StorageStatus | null>(null)
   const [error, setError] = useState<null | string>(null)
+  const [listFailures, setListFailures] = useState<string[]>([])
   const [configured, setConfigured] = useState(true)
   const [query, setQuery] = useState('')
   const [filter, setFilter] = useState<'all' | 'image' | 'model'>('all')
@@ -986,10 +995,12 @@ export function Gallery({
 
   const refresh = useCallback(() => {
     setError(null)
-    rest<{ configured: boolean; models: RemoteAsset[] }>('models', { timeoutMs: 60_000 })
+    setListFailures([])
+    rest<{ configured: boolean; models: RemoteAsset[]; failed?: unknown }>('models', { timeoutMs: 60_000 })
       .then(r => {
         setConfigured(r.configured)
         setRemote(r.models)
+        setListFailures(listFailureNotices(r.failed))
       })
       .catch((e: unknown) => setError(errorText(e)))
     rest<StorageStatus>('storage').then(setStorage).catch(() => setStorage(null))
@@ -1103,6 +1114,11 @@ export function Gallery({
             </div>
           )}
           {error && <div style={{ ...V.hint, ...V.error }}>{error}</div>}
+          {listFailures.map(line => (
+            <div data-meshy-list-failed key={line} style={V.hint}>
+              {line}
+            </div>
+          ))}
           {local && local.some(f => matchesKind(filter, f.kind || 'model')) && <div data-meshy-local-heading style={V.section}>{localHeading(locality)}</div>}
           {local?.filter(f => matchesKind(filter, f.kind || 'model') && matches(f.prompt, f.name, f.project)).map(f => {
             const s = sourceForLocalFile(f)

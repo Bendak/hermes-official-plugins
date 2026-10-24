@@ -314,25 +314,40 @@ def _credits_by_task(key: str) -> dict[str, int]:
             if isinstance(r, dict) and r.get("task_id") and isinstance(r.get("consumed_credits"), (int, float))}
 
 
+def _gallery_lists(endpoints, limit: int, key: str) -> tuple[list[tuple[str, object]], list[dict]]:
+    """Each product's newest tasks, plus ``failed`` (``{"task_type", "error"}``) for the products whose list read
+    failed: a plan-gated product (403) or one route's outage never hides the others. Only a refusal of the key
+    itself (401, or 403 on a generic route every plan reads) fails the gallery, and so does every list failing."""
+    lists = _fan_out(lambda e: _meshy_get(f"{e[1]}?page_size={limit}&sort_by=-created_at", key), endpoints)
+    generic = {_TASK_ROUTES[t] for t in _PROBE_FIRST}
+    listed: list[tuple[str, object]] = []
+    failed: list[tuple[str, Exception]] = []
+    for (task_type, path), future in zip(endpoints, lists):
+        try:
+            listed.append((task_type, future.result()))
+        except urllib.error.HTTPError as exc:
+            if exc.code == 401 or (exc.code == 403 and path in generic):
+                raise _meshy_error(exc) from exc
+            if exc.code != 404:  # 404: a route this account does not have, so nothing to list
+                failed.append((task_type, exc))
+        except (urllib.error.URLError, OSError, ValueError) as exc:
+            failed.append((task_type, exc))
+    if failed and not listed:
+        raise _meshy_error(failed[0][1]) from failed[0][1]
+    return listed, [{"task_type": t, "error": _meshy_error(exc).detail} for t, exc in failed]
+
+
 @router.get("/models")
 def models(limit: int | None = Query(None, ge=1, le=60)):
     limit = limit or _settings()["gallery_limit"]
     key = _api_key()
     if not key:
-        return {"configured": False, "models": []}
+        return {"configured": False, "models": [], "failed": []}
     merged: list[dict] = []
     records: dict[str, tuple[str, dict]] = {}
     endpoints = (*_MODEL_ENDPOINTS, *_IMAGE_ENDPOINTS)
-    lists = _fan_out(lambda e: _meshy_get(f"{e[1]}?page_size={limit}&sort_by=-created_at", key), endpoints)
-    for (task_type, _path), listed in zip(endpoints, lists):
-        try:
-            rows = listed.result()
-        except urllib.error.HTTPError as exc:
-            if exc.code in (401, 403):
-                raise _meshy_error(exc) from exc
-            continue  # one type failing (404 on an endpoint the account lacks) never hides the rest
-        except (urllib.error.URLError, OSError, ValueError) as exc:
-            raise _meshy_error(exc) from exc
+    listed, failed = _gallery_lists(endpoints, limit, key)
+    for task_type, rows in listed:
         for row in rows if isinstance(rows, list) else []:
             if not isinstance(row, dict) or row.get("status") != "SUCCEEDED":
                 continue
@@ -376,7 +391,7 @@ def models(limit: int | None = Query(None, ge=1, le=60)):
         m["local_path"] = saved.get(m["task_id"]) if m["kind"] == "model" else None
         m["prompt"] = _label_for(m["task_id"], prov) or m["prompt"]
     visible = [m for m in merged if not m["expired"] or m["local_path"]]
-    return {"configured": True, "models": visible[:limit]}
+    return {"configured": True, "models": visible[:limit], "failed": failed}
 
 
 # Profile-scoped index of models this plugin served or saved, so files the agent wrote into a project
@@ -1349,12 +1364,16 @@ def details(task: str):
     rec = prov.get(task, {})
     key = _api_key()
     row: dict = {}
+    remote_error = None
     if key:
+        # The recorded lineage is local: only a refused key fails the panel. A task Meshy lost answers without a
+        # notice; an outage or a plan-gated route keeps the recorded fields and says why Meshy's are missing.
         try:
             row = _task(task, key)
+        except _KeyRefused:
+            raise
         except HTTPException as exc:
-            if exc.status_code in (401, 403):
-                raise
+            remote_error = None if exc.status_code == 404 else exc.detail
     # Walk recorded parents for the chain, and find what was made from this task.
     chain, cur, hops = [], rec.get("parent"), 0
     while cur and hops < 12 and cur not in {c["task_id"] for c in chain}:
@@ -1400,6 +1419,7 @@ def details(task: str):
         "children": children,
         "session_id": rec.get("session_id"),
         "recorded": bool(rec),
+        "remote_error": remote_error,
     }
 
 
