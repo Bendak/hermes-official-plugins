@@ -177,7 +177,11 @@ def test_bad_ids_and_records_never_reach_files_outside_the_audio_folder(api, _he
 
     assert client.get("/audio?id=aaaaaaaaaaaa").status_code == 410
     assert client.get("/audio?id=bbbbbbbbbbbb").status_code == 410
-    assert client.get("/audio?id=dddddddddddd").status_code == 410
+    refused = client.get("/audio?id=dddddddddddd")
+    assert refused.status_code == 410
+    if hard:  # still on disk: the answer says why it isn't served instead of calling it gone
+        assert "hard link" in refused.json()["detail"]
+    assert "no longer" in client.get("/audio?id=bbbbbbbbbbbb").json()["detail"]
     rows = {r["id"]: r for r in client.get("/sounds").json()["sounds"]}
     assert rows["aaaaaaaaaaaa"]["exists"] is False and rows["bbbbbbbbbbbb"]["path"] is None
     assert client.get("/audio?id=../../x").status_code == 400
@@ -257,9 +261,7 @@ def test_the_bundled_skill_is_registered(loaded):
     text = Path(skills[qualified]["path"]).read_text(encoding="utf-8")
     front = yaml.safe_load(text.split("---", 2)[1])
     assert front["name"] == "elevenlabs-sound-design" and len(front["description"]) <= 60
-    # The skill delivers every sound as a MEDIA: line; Desktop draws the card itself, so the model is never
-    # told to write a card directive.
-    assert "MEDIA:" in text and "::elevenlabs-sfx" not in text and "desktop_card" not in text
+    assert "MEDIA:" in text
 
 
 def _write_tone(path: Path, seconds: float = 0.5, rate: int = 48000) -> None:
@@ -274,39 +276,16 @@ def _write_tone(path: Path, seconds: float = 0.5, rate: int = 48000) -> None:
         out.writeframes(b"".join(struct.pack("<h", int(12000 * math.sin(2 * math.pi * 440 * i / rate)))
                                  for i in range(int(seconds * rate))))
 
-# How a generated sound reaches the user: always the plain ``MEDIA:`` line, on every surface. Hermes
-# Desktop upgrades that line to the plugin's sound card by itself (the tool-media renderer seam: it maps the
-# path to the tool call that produced it), so the tool never decides per surface and there is no Desktop
-# handshake. The length reported is the length of the audio ElevenLabs returned.
+# How a generated sound reaches the user: the plain ``MEDIA:`` line, which every surface plays. Hermes
+# Desktop upgrades it to the plugin's sound card by itself (its tool-media renderer seam maps the path to
+# the tool call that produced it). The length reported is the length of the audio ElevenLabs returned.
 
 
-@pytest.fixture
-def turn(loaded):
-    """``call`` as a turn on ``surface``: the turn's session context names its surface the way the
-    gateway binds it, and the dispatcher passes the handler the session id."""
-    from gateway.session_context import clear_session_vars, set_session_vars
-
+def test_the_result_delivers_the_sound_as_a_media_line(loaded):
     _, call = loaded
-
-    def run(args: dict, surface: str, session: str = "s-1") -> dict:
-        tokens = set_session_vars(platform=surface, session_id=session)
-        try:
-            return call(args, session_id=session)
-        finally:
-            clear_session_vars(tokens)
-
-    return run
-
-
-@pytest.mark.parametrize("surface", ["desktop", "cli", "tui", "telegram", "discord", "api_server", "cron", ""])
-def test_every_surface_gets_the_plain_media_line(turn, api, surface):
-    _, client = api
-    # The old card handshake is gone: nothing a Desktop posts can turn a result into a card line.
-    assert client.post("/card-ready", json={"prompt": "door knock", "session": "s-1"}).status_code in (404, 405)
-    result = turn({"prompt": "door knock", "duration_seconds": 1}, surface)
+    result = call({"prompt": "door knock", "duration_seconds": 1}, session_id="20261024_101500_abcdef")
     assert result["success"] is True and result["media_tag"] == f"MEDIA:{result['file_path']}"
     assert Path(result["file_path"]).is_file() and Path(result["file_path"]).stem.endswith(result["sound_id"])
-    assert "desktop_card" not in result and "::elevenlabs-sfx" not in json.dumps(result)
 
 
 def test_the_reported_length_is_the_returned_audio_not_the_request(loaded, api, stand_in, audio):

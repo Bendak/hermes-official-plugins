@@ -59,6 +59,17 @@ export function bytesLabel(n: null | number): string {
 export const secondsLabel = (s: null | number | undefined): string =>
   typeof s === 'number' && Number.isFinite(s) ? `${s < 10 ? s.toFixed(2).replace(/\.?0+$/, '') : Math.round(s)} s` : 'auto length'
 
+/**
+ * A tool-media card hands the sound back to Desktop's built-in player (`fallback`) whenever it could not
+ * play it itself: the record could not be read, the backend will not serve the file (gone, or refused,
+ * e.g. hard-linked by a backup tool), or loading the audio failed. The built-in player streams the MEDIA:
+ * path on its own, so the sound stays playable. Directive cards (old transcripts) have no fallback.
+ */
+export function showsFallback(card: { record: 'error' | 'loading' | 'ready'; exists?: boolean; audio?: string }, hasFallback: boolean): boolean {
+  if (!hasFallback) return false
+  return card.record === 'error' || (card.record === 'ready' && (card.exists === false || card.audio === 'error'))
+}
+
 /** A playback clock: `0:01.5`, `1:04.0`. */
 export function clockLabel(seconds: number): string {
   const t = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 10) / 10 : 0

@@ -155,10 +155,10 @@ the file names).
 4. Post-process only when the destination needs it (format, loudness, trimming, a loop check).
    Completion: the script printed `"ok": true` for every file, or you report its error line.
 5. Deliver: put each sound's `media_tag` (`MEDIA:<file_path>`) on its own line in your reply, with one
-   line of text before it. That one line works on every surface: Hermes Desktop shows it as the
-   plugin's sound card (waveform, play, loop audition, downloads, Next actions) or, without the
-   plugin's Desktop half, in its own player; Telegram, Discord, Slack, WhatsApp, Signal and the
-   other messaging apps send it as a file; the CLI shows the path. Rules:
+   line of text before it. That one line works on every surface: Hermes Desktop plays it, as this
+   plugin's sound card where Desktop supports plugin media cards (waveform, loop audition,
+   downloads, Next actions) and in its built-in player otherwise; Telegram, Discord, Slack,
+   WhatsApp, Signal and the other messaging apps send it as a file; the CLI shows the path. Rules:
    - The file path appears ONLY on its `MEDIA:` line, never in prose, or messaging apps send it twice.
      Markdown links and images are not delivered.
    - Files you made from a sound (a `loopfix` result, a conversion, a pack zip) each get their own
@@ -186,8 +186,6 @@ the file names).
   deliver the original sound and say processing needs the local terminal.
 - Files live on the machine Hermes runs on. A Desktop connected to a remote Hermes still plays and
   downloads them; paths in replies are paths on that host.
-- Never write a `::` card directive for a sound, even if an older reply in the chat has one (earlier
-  versions of this plugin used them): Desktop draws the card from the `MEDIA:` line.
 
 ## Verification
 

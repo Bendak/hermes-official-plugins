@@ -135,6 +135,23 @@ def _convert(ffmpeg: str, source: Path, target_format: str) -> bytes:
             pass
 
 
+def _refused(row: dict) -> HTTPException | None:
+    """Why a file that is still there is not served: another hard link to it (a backup tool such as
+    rsnapshot or ``cp -al``). The tool writes each file once, so a second link may point anywhere."""
+    name = row.get("file_name")
+    if not isinstance(name, str) or not _prov.AUDIO_NAME_RE.fullmatch(name):
+        return None
+    try:
+        links = (_prov.audio_dir() / name).lstat().st_nlink
+    except OSError:
+        return None
+    if links > 1:
+        return HTTPException(status_code=410, detail=(
+            "the sound file has another hard link (a backup tool such as rsnapshot or cp -al?), so this "
+            "plugin won't serve it; Desktop's own player can still play it from the chat"))
+    return None
+
+
 @router.get("/audio")
 def audio(id: str = Query(""), format: str = Query("original")) -> dict:  # noqa: A002
     row = _record(id)
@@ -143,7 +160,7 @@ def audio(id: str = Query(""), format: str = Query("original")) -> dict:  # noqa
     gone = HTTPException(status_code=410, detail="the sound file is no longer on the Hermes host")
     path = _prov.audio_path(row)
     if path is None:
-        raise gone
+        raise _refused(row) or gone
     try:
         too_big = path.stat().st_size > _MAX_AUDIO_BYTES
     except OSError:

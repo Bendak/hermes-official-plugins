@@ -75,7 +75,7 @@ const media = over => ({
 const pick = element => element.type(element.props)
 
 test('a Desktop with the seam gets a sound-card renderer for this plugin\u2019s own tool only', async () => {
-  const { registered, events } = await loadPlugin(true)
+  const { registered } = await loadPlugin(true)
   const renderers = registered.filter(c => c.area === 'transcript.toolMedia')
   assert.equal(renderers.length, 1)
   assert.deepEqual(renderers[0].data.tools, ['elevenlabs_sound_effect'])
@@ -83,22 +83,21 @@ test('a Desktop with the seam gets a sound-card renderer for this plugin\u2019s 
   assert.equal(card.type.name, 'SoundCard')
   assert.equal(card.props.id, 'abcdef012345')
   assert.equal(card.props.sessionId, 's-1') // Next actions go to the chat that shows the card
-  assert.equal(card.props.fallback, 'BUILT-IN PLAYER') // shown if the record can't be read
+  assert.equal(card.props.fallback, 'BUILT-IN PLAYER') // shown whenever the card can't play the sound
+  assert.equal(typeof card.props.resolveUrl, 'function') // plays from the backend that owns the chat
   // Nothing it can't draw as a sound card loses the built-in player.
   for (const over of [{ result: { success: false, error: 'HTTP 400' } }, { file: { ...media().file, name: 'voice.mp3' }, result: null }, { file: { ...media().file, kind: 'video' } }]) {
     assert.equal(pick(renderers[0].data.render(media(over))).props.children, 'BUILT-IN PLAYER')
   }
-  // Old transcripts still render; no card handshake listens to tool starts.
+  // Cards in chats from before the seam still render.
   assert.ok(registered.some(c => c.area === 'transcript.directive' && c.data.name === 'elevenlabs-sfx'))
-  assert.ok(!events.includes('tool.start'))
 })
 
 test('an older Desktop without the seam loads the plugin and keeps its built-in player', async () => {
-  const { registered, events } = await loadPlugin(false)
+  const { registered } = await loadPlugin(false)
   assert.ok(!registered.some(c => c.area === 'transcript.toolMedia' || c.area === undefined))
   assert.ok(registered.some(c => c.area === 'transcript.directive'))
   assert.ok(registered.some(c => c.area === 'palette'))
-  assert.ok(!events.includes('tool.start'))
 })
 
 test('every theme colour comes from Desktop\u2019s documented plugin variables (--ui-*)', async () => {

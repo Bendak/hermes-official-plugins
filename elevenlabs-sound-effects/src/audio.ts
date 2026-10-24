@@ -19,8 +19,10 @@ export interface AudioPayload {
 let audioContext: AudioContext | null = null
 const context = (): AudioContext => (audioContext ??= new AudioContext())
 
-export async function decode(dataUrl: string): Promise<AudioBuffer> {
-  const bytes = await (await fetch(dataUrl)).arrayBuffer()
+export async function decode(url: string): Promise<AudioBuffer> {
+  const response = await fetch(url)
+  if (!response.ok) throw new Error(`${response.status}: audio unavailable`)
+  const bytes = await response.arrayBuffer()
   return context().decodeAudioData(bytes)
 }
 
@@ -34,11 +36,23 @@ export interface DecodedSound {
 // for 30 s of 44.1 kHz stereo, so the bound stays small).
 const decoded = new PromiseCache<DecodedSound>(6)
 
-/** Original bytes of sound `id` from the active backend, decoded, with waveform peaks. */
-export function loadSound(ctx: PluginContext, id: string): Promise<DecodedSound> {
+/**
+ * Sound `id`, decoded, with waveform peaks. `resolveUrl` (a tool-media card's `file.resolveUrl`) streams
+ * the file from the backend that owns the chat; without it, or when it fails, the bytes come from this
+ * plugin's backend on the active connection.
+ */
+export function loadSound(ctx: PluginContext, id: string, resolveUrl?: () => Promise<string>): Promise<DecodedSound> {
   const scope = currentScope()
   return decoded.get(`${scope.connection}\u0000${scope.profile}\u0000${id}`, async () => {
-    const buffer = await decode((await fetchAudio(ctx, id, 'original')).data_url)
+    let buffer: AudioBuffer | null = null
+    if (resolveUrl) {
+      try {
+        buffer = await decode(await resolveUrl())
+      } catch {
+        buffer = null
+      }
+    }
+    buffer ??= await decode((await fetchAudio(ctx, id, 'original')).data_url)
     return { buffer, wave: peaks(buffer) }
   })
 }

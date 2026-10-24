@@ -70,8 +70,9 @@ The tool also takes an optional `model` per call (`eleven_text_to_sound_v2` or
 
 Each sound is saved to `<HERMES_HOME>/cache/generated/audio/sfx_<description>_<timestamp>_<id>.<ext>`
 and never overwrites an earlier one. The Desktop card and library serve a file only while it has a single
-link: a backup tool that hard-links your Hermes folder (rsnapshot, `cp -al`) makes those sounds show
-as gone in Desktop until the extra links are removed (the files themselves are untouched). Ask the agent to copy it into your project if you want it
+link: after a backup tool hard-links your Hermes folder (rsnapshot, `cp -al`), those sounds play in
+Desktop's built-in player instead of the card, and the library can't play or download them until the
+extra links are removed (the files themselves are untouched). Ask the agent to copy it into your project if you want it
 somewhere else.
 
 Each generation also appends one line to `<HERMES_HOME>/plugin-data/<plugin namespace>/sounds.jsonl`
@@ -92,10 +93,10 @@ Hermes Desktop works out which tool produced that file and, when it was `elevenl
 the Desktop half is on, lets this plugin draw it as a sound card instead of the built-in audio player.
 That needs a Hermes Desktop with tool-media renderers (on `main` since commit `567569267a`; first in the
 next release after v0.22.5). On older Desktops, or with the Desktop half off, the same line plays in
-Desktop's built-in player, and so does anything the card can't draw (a sound made in another profile,
-a record that was removed). Nothing depends on which surface a chat was started on, and the agent
-never writes a card line. Chats from earlier versions of this plugin, which used
-`::elevenlabs-sfx{id="<sound_id>"}` lines, still show their cards.
+Desktop's built-in player. The card also hands the sound back to the built-in player whenever it can't
+play it itself: a sound made in another profile, a removed record, or a file the plugin won't serve
+(see [Where files go](#where-files-go)). Nothing depends on which surface a chat was started on, and the
+agent never writes a card line.
 
 The card shows the prompt, length, loop, model, format and credits billed, a waveform you can click
 to seek, Play/Pause, a **Loop** toggle that repeats the sound gaplessly so you can hear the seam,
@@ -122,8 +123,7 @@ sounds play in its built-in player. The files stay on the Hermes machine. Playba
 connection Reveal is replaced by a note saying which host holds the file; where Desktop can't tell
 (a per-profile remote override) the library names the host the backend reports and Reveal explains
 when the file is not on this computer. Format conversion needs ffmpeg on that host; without it only
-the original format is offered and the menu says why. Sounds made before version 1.1.0 have no record
-and don't appear in the library.
+the original format is offered and the menu says why.
 
 ## Cost and privacy
 

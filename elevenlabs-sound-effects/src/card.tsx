@@ -7,7 +7,7 @@ import { Button, Codicon } from '@hermes/plugin-sdk'
 import { type ReactNode, useEffect, useState } from 'react'
 
 import { backendIsRemote, errorText, onScopeChange, statusOf } from './audio.ts'
-import { billed, formatLabel, type HostInfo, lengthLabel, modelLabel, SOUND_ID, soundIdOf, type SoundRecord } from './sound.ts'
+import { billed, formatLabel, type HostInfo, lengthLabel, modelLabel, SOUND_ID, soundIdOf, type SoundRecord, showsFallback } from './sound.ts'
 import { Chip, Clock, DownloadMenu, NextMenu, S, T, Transport, useSound, Waveform, Where } from './ui.tsx'
 
 const AUTO_LOAD_BYTES = 4 * 1024 * 1024
@@ -39,6 +39,7 @@ export function ToolMediaSoundCard({
       fallback={media.fallback}
       id={id}
       onOpenLibrary={onOpenLibrary}
+      resolveUrl={typeof media.file?.resolveUrl === 'function' ? media.file.resolveUrl : undefined}
       sessionId={media.sessionId}
       source=""
       streaming={false}
@@ -53,7 +54,8 @@ export function SoundCard({
   streaming,
   source,
   onOpenLibrary,
-  fallback
+  fallback,
+  resolveUrl
 }: {
   ctx: PluginContext
   id: string
@@ -61,8 +63,10 @@ export function SoundCard({
   streaming: boolean
   source: string
   onOpenLibrary: () => void
-  /** Tool-media cards: shown instead of an error card when the record can't be read. */
+  /** Tool-media cards: Desktop's built-in player, shown whenever this card can't play the sound. */
   fallback?: ReactNode
+  /** Tool-media cards: the file's URL from the backend that owns the chat. */
+  resolveUrl?: () => Promise<string>
 }) {
   const valid = SOUND_ID.test(id)
   const [state, setState] = useState<State>({ kind: 'loading' })
@@ -107,7 +111,7 @@ export function SoundCard({
     )
   }
   if (state.kind === 'error') {
-    if (fallback !== undefined) return <>{fallback}</>
+    if (showsFallback({ record: 'error' }, fallback !== undefined)) return <>{fallback}</>
     return (
       <div data-sfx-card="error" style={S.card}>
         <span style={S.error}>{state.message}</span>
@@ -121,7 +125,18 @@ export function SoundCard({
       </div>
     )
   }
-  return <ReadyCard ctx={ctx} info={state.info} onOpenLibrary={onOpenLibrary} rec={state.rec} remote={remote} sessionId={sessionId} />
+  return (
+    <ReadyCard
+      ctx={ctx}
+      fallback={fallback}
+      info={state.info}
+      onOpenLibrary={onOpenLibrary}
+      rec={state.rec}
+      remote={remote}
+      resolveUrl={resolveUrl}
+      sessionId={sessionId}
+    />
+  )
 }
 
 function ReadyCard({
@@ -130,7 +145,9 @@ function ReadyCard({
   info,
   remote,
   sessionId,
-  onOpenLibrary
+  onOpenLibrary,
+  fallback,
+  resolveUrl
 }: {
   ctx: PluginContext
   rec: SoundRecord
@@ -138,14 +155,19 @@ function ReadyCard({
   remote: boolean | null
   sessionId: null | string | undefined
   onOpenLibrary: () => void
+  fallback?: ReactNode
+  resolveUrl?: () => Promise<string>
 }) {
-  const sound = useSound(ctx, rec, `card:${rec.id}`)
+  const sound = useSound(ctx, rec, `card:${rec.id}`, resolveUrl)
   useEffect(() => {
     if (rec.exists && (rec.size ?? 0) <= AUTO_LOAD_BYTES) void sound.load()
     // eslint-disable-next-line react-hooks/exhaustive-deps -- load once per record
   }, [rec.id])
   const cost = billed(rec)
   const wave = sound.loaded.state === 'ready' ? sound.loaded.wave : null
+  if (showsFallback({ record: 'ready', exists: rec.exists, audio: sound.loaded.state }, fallback !== undefined)) {
+    return <>{fallback}</>
+  }
   return (
     <div data-sfx-card="ready" data-sfx-id={rec.id} style={S.card}>
       <div style={{ ...S.row, justifyContent: 'space-between', alignItems: 'flex-start' }}>

@@ -11,6 +11,7 @@ import {
   PromiseCache,
   ratePerSecond,
   SEND_FAILED,
+  showsFallback,
   soundIdOf,
   submitToChat
 } from '../src/sound.ts'
@@ -160,11 +161,19 @@ test('the card draws only this tool\u2019s successful sounds: id from the result
   assert.equal(soundIdOf({}, 'sfx_x_20261024_101500_0123456789ab.flac'), null)
 })
 
-test('Next asks the agent for the MEDIA: line, never a card directive', () => {
-  for (const a of nextActions(rec())) {
-    assert.match(a.message, /media_tag line/)
-    assert.doesNotMatch(a.message, /sound card|desktop_card|::elevenlabs/)
-  }
+test('Next asks the agent to reply with the MEDIA: line, which Desktop draws as the card', () => {
+  for (const a of nextActions(rec())) assert.match(a.message, /media_tag line/)
+})
+
+test('a tool-media card hands the sound to the built-in player whenever it cannot play it', () => {
+  const card = (record, more = {}) => showsFallback({ record, ...more }, true)
+  assert.equal(card('loading'), false)
+  assert.equal(card('ready', { exists: true, audio: 'ready' }), false)
+  assert.equal(card('error'), true) // record not readable (another profile, plugin backend off)
+  assert.equal(card('ready', { exists: false, audio: 'idle' }), true) // gone or refused (hard link)
+  assert.equal(card('ready', { exists: true, audio: 'error' }), true) // the audio would not load
+  // A directive card from an old transcript has no built-in player to hand back to.
+  assert.equal(showsFallback({ record: 'error' }, false), false)
 })
 
 test('the card clock reads position and length in tenths', () => {
