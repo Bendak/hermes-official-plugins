@@ -37,6 +37,21 @@ Ubuntu x86_64, Blender 5.2.3 LTS (official tarball on `PATH`), add-on v1.0.3 ins
 
 The 0.3.0 run needs a Hermes whose `skill_view` resolves the `plugin:<namespace>:<skill>` form the skills index invites; on releases without it the agent may fail to load this skill by that name.
 
+### Linux: Hermes installs Blender itself (0.4.0)
+
+Ubuntu x86_64, the installed Hermes (`hermes` from the user's install) with a fresh `HOME` and `HERMES_HOME`: no Blender anywhere on the machine for that home, no add-on, Blender's saved **Allow Online Access** off. Plugin installed with `hermes plugins install <repo>#blender --ref <sha>`. Real model turns, read back from the session's own `state.db`.
+
+| Check | Result |
+|---|---|
+| Install 0.3.0 in that home | Refused: `blender is not installed. Install blender 5.1 or newer` |
+| Install 0.4.0 in that home | Installed and enabled |
+| Turn 1: "What objects are in my Blender scene?" | `get_objects_summary` fails to connect; the agent finds no Blender, asks once (download size, user folder, no admin, the add-on's open port), installs nothing |
+| Turn 2: "Yes, go ahead" | Picks the newest release from download.blender.org, checks `blender-5.2.3-linux-x64.tar.xz` against `blender-5.2.3.sha256` (match), unpacks to `~/.local/opt`, links `~/.local/bin/blender`, installs add-on v1.0.3 (hash match), opens `blender --online-mode`, reads Camera/Cube/Light through `get_objects_summary` |
+| Blender present, add-on missing | One question, then add-on install, `--online-mode` launch and a scene read through `get_objects_summary` |
+| Session started without the Blender tools | Gets Blender ready, then asks for `/reload-mcp` or a new chat; sends nothing to port 9876 itself |
+
+The macOS (`.dmg` into `/Applications`) and Windows (`.zip` into `%LOCALAPPDATA%\Programs\Blender Foundation`) install steps are not yet run on a real machine.
+
 ## Limits
 
 - Background mode does not test interactive screenshots, viewport rendering or deferred completion.
@@ -44,8 +59,7 @@ The 0.3.0 run needs a Hermes whose `skill_view` resolves the `plugin:<namespace>
 - Full Windows Hermes install/activation and profile isolation were not established by the protocol smoke alone.
 - The first uv download/build took several minutes. README preparation avoids relying on a short MCP discovery deadline.
 - MCP serverInfo reported `1.30.0`; the server source is identified by the immutable Git revision above, not that advertised string.
-- `plugin.json` declares Blender's presence and version (5.1+, Windows and macOS). No liveness gate is declared: connection failure reports an unavailable bridge; it does not prove why Blender is unavailable.
-- Presence was checked on macOS with Blender 5.2.1 in `/Applications` and on Linux with `blender` on `PATH`. The Windows locations, and the Linux flatpak, snap and Steam locations, are not yet checked on a real machine.
-- Known detection gaps (the install is refused although Blender is there): a custom folder picked in the Windows MSI (the MSI records no install folder in its uninstall entry), the Microsoft Store package, a Steam library outside the default one, and a Linux tarball that is not on `PATH`.
+- `plugin.json` declares no application requirement, so installing the plugin never depends on Blender being present; the skill checks for Blender 5.1+ when a task needs it.
+- Blender is located by the skill, not at install time. Places it does not look: a custom folder picked in the Windows MSI, the Microsoft Store package, a Steam library outside the default one, and a Linux tarball outside `~/.local/opt` that is not on `PATH`; there it offers a fresh install, and the user can name the existing path instead.
 
 Machine-specific raw logs and remote harnesses are retained privately and excluded from this repository.
