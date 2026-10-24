@@ -459,7 +459,7 @@ def _record_asset(path: Path, task_id: str | None = None, export: bool = False) 
                     row["sha256"] = _sha256(resolved)
             row.update(name=resolved.name, last_opened=now, task_id=task or row.get("task_id"))
             if export:
-                row["saved"] = {"bytes": st.st_size, "mtime_ns": st.st_mtime_ns, "task_id": task}
+                row["saved"] = {**_fingerprint(st), "task_id": task}
             rows.sort(key=lambda r: r.get("last_opened") or 0, reverse=True)
             # Models and other exports are capped apart: a run of STL saves must not push gallery models out.
             is_model = [Path(r.get("path", "")).suffix.lower() in _INDEXED for r in rows]
@@ -711,13 +711,18 @@ def _remember(slot: tuple[str, str], route: str | None) -> None:
 
 
 def _owned(row: dict, route: str, task_id: str, key: str) -> tuple[dict, str | None]:
-    """Re-read a task found on a generic route from its own route, which carries its files. The route is None when
-    the task's own route did not answer: the generic record lacks its files, so it serves this read but is never
-    cached, and the next read asks the own route again (a brief miss there must not hide the finished model)."""
+    """Re-read a task found on a generic route from its own route, which carries its files. When the own route does
+    not answer, the generic record lacks the files: a running or failed task still gets it (status and progress
+    are all a card reads) with route None, so it is never cached and the next read asks the own route again; a
+    finished one is a 502, because its record without files would show a finished task with no model."""
     own = _route_for(row.get("type"))
     if own and own != route:
         owned = _task_at(own, task_id, key)
         if owned is None:
+            if str(row.get("status") or "").upper() == "SUCCEEDED":
+                # Finished, but its files are only on the route that missed: "no model" is unknown, not known, and
+                # a card stops polling on a final status, so answer an outage it retries instead.
+                raise HTTPException(status_code=502, detail="Meshy did not return this task's files; try again")
             return row, None
         return owned, own
     return row, route
@@ -853,8 +858,16 @@ def _saved_rows() -> dict[str, dict]:
     return {r["path"]: r for r in _load_index() if isinstance(r, dict) and r.get("path")}
 
 
+def _fingerprint(st: os.stat_result) -> dict:
+    """What /save's write looked like: any in-place edit changes ctime (no user tool can set it, unlike mtime, which
+    ``cp -p``/``touch -r`` restore), and an editor's save-as-rename changes the inode. Windows' st_ctime is the
+    creation time (and deprecated there), so it counts only on POSIX."""
+    return {"bytes": st.st_size, "mtime_ns": st.st_mtime_ns, "ino": st.st_ino,
+            "ctime_ns": st.st_ctime_ns if os.name != "nt" else None}
+
+
 def _ours(path: Path, saved: dict[str, dict]) -> dict | None:
-    """The save-time record (``{"bytes", "mtime_ns", "task_id"}``) of a file /save wrote and nobody has touched
+    """The save-time record (``_fingerprint`` + ``task_id``) of a file /save wrote and nobody has touched
     since, else None. Only /save's own write records it (``_record_asset(export=True)``): the row's read-time
     size/mtime are gallery metadata and never vouch for a file, and a row from before this record (or one the
     index cap dropped) is not ours either, so in doubt the save takes a new name instead of replacing a file."""
@@ -866,7 +879,7 @@ def _ours(path: Path, saved: dict[str, dict]) -> dict | None:
         st = path.lstat()
     except OSError:
         return None
-    if not stat.S_ISREG(st.st_mode) or mark.get("bytes") != st.st_size or mark.get("mtime_ns") != st.st_mtime_ns:
+    if not stat.S_ISREG(st.st_mode) or any(mark.get(k) != v for k, v in _fingerprint(st).items()):
         return None
     return mark
 
@@ -889,7 +902,7 @@ def _beside_dest(folder: Path, stem: str, fmt: str, task_id: str, anchor: Path |
         return dest, dest.is_file()
     # The suffixed name gets the same check (the user may have edited it too): first free-or-ours wins.
     for name in [stem, f"{stem}-{task_id[-8:]}", *(f"{stem}-{task_id[-8:]}-{n}" for n in range(2, 100))]:
-        if not any((folder / n).exists() and not _ours(folder / n, saved) for n in _bundle(name, fmt)):
+        if not any(os.path.lexists(folder / n) and not _ours(folder / n, saved) for n in _bundle(name, fmt)):
             dest = folder / _saved_name(name, fmt)
             break
     else:
@@ -1002,14 +1015,28 @@ def _save_format(row: dict, urls: dict[str, str], task_id: str, fmt: str, folder
         if fresh:
             _download(urls[fmt], dest)
             _record_asset(dest, task_id, export=True)
-        # The .mtl is published last: an OBJ without one is a save whose companions failed, so finish them now.
-        if fmt == "obj" and urls.get("mtl") and (fresh or not (folder / f"{stem}.mtl").is_file()):
+        # The .mtl is published last: an OBJ without one is a save whose companions failed, so finish them now, but
+        # only on this task's own save. An OBJ that is the card's model (the anchor) without a .mtl may be the user's.
+        if fmt == "obj" and urls.get("mtl") and (fresh or (not (folder / f"{stem}.mtl").is_file()
+                                                           and _finishable(folder, stem, fmt, task_id, beside))):
             _save_obj_material(row, urls["mtl"], folder, stem)
             for name in _bundle(stem, fmt):  # the rewritten OBJ and its companions are Hermes' saves too
                 _record_asset(folder / name, task_id, export=True)
     if fmt in ("glb", "gltf"):
         _record_asset(dest, task_id)
     return {"path": str(dest), "bytes": dest.stat().st_size}
+
+
+def _finishable(folder: Path, stem: str, fmt: str, task_id: str, beside: bool) -> bool:
+    """Whether an earlier save of ``task_id`` may be completed in place: always in the plugin's own folder; beside a
+    project only when the main file is that task's untouched save and every companion name is free or Hermes'."""
+    if not beside:
+        return True
+    saved = _saved_rows()
+    main, *companions = _bundle(stem, fmt)
+    mark = _ours(folder / main, saved)
+    return bool(mark) and mark.get("task_id") == task_id and all(
+        not os.path.lexists(folder / n) or _ours(folder / n, saved) for n in companions)
 
 
 # One lock per destination path, so concurrent saves of the same file download it once.

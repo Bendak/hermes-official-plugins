@@ -559,3 +559,71 @@ def test_viewing_a_file_never_makes_it_replaceable(api, monkeypatch):
     tank.write_bytes(b"glTF-tank")
     saved = Path(api.save({"task": other, "format": "stl", "beside": str(tank)})["path"])
     assert legacy.read_bytes() == b"USER TANK" and saved.name == f"tank-{other[-8:]}.stl"
+
+
+def test_an_obj_anchor_hermes_did_not_save_is_never_rewritten(api, monkeypatch):
+    """The card's model can be the user's own OBJ (no .mtl beside it). Download ▸ OBJ of that card must not
+    complete "missing companions" over it: the user's mtllib line, texture and mesh stay, nothing is marked as
+    Hermes' save, and another task's OBJ saved beside the project later takes a new name."""
+    other, task = "01a15976-d838-7532-99d8-000000000052", _TASK
+    a = "https://assets.meshy.ai/"
+    rows = {t: {"id": t, "model_urls": {"obj": a + f"{t[-2:]}.obj", "mtl": a + "m.mtl"},
+                "texture_urls": [{"base_color": a + "tex.png"}]} for t in (other, task)}
+    monkeypatch.setattr(api, "_task", lambda t, _k: rows[t])
+    _fake_assets(monkeypatch, api, {"52.obj": b"mtllib material.mtl\nv 1 1 1\n", "6c.obj": b"mtllib material.mtl\nv 0 0 0\n",
+                                    "m.mtl": b"newmtl material\nmap_Kd texture_0.png\n", "tex.png": b"PNG-MESHY"})
+    proj = Path.home() / "projects" / "obj"
+    proj.mkdir(parents=True)
+    user_obj, user_tex = proj / "robot.obj", proj / "robot_texture.png"
+    user_obj.write_bytes(b"mtllib my_materials.mtl\nv 9 9 9\n")
+    user_tex.write_bytes(b"PNG-USER")
+    api.file(str(user_obj), task=task)
+
+    got = Path(api.save({"task": task, "format": "obj", "beside": str(user_obj)})["path"])
+    assert got == user_obj.resolve()
+    assert user_obj.read_bytes() == b"mtllib my_materials.mtl\nv 9 9 9\n" and user_tex.read_bytes() == b"PNG-USER"
+    assert not (proj / "robot.mtl").exists()
+    assert not any(r.get("saved") for r in api._load_index())
+
+    anchor = proj / "robot.glb"
+    anchor.write_bytes(b"glTF")
+    second = Path(api.save({"task": other, "format": "obj", "beside": str(anchor)})["path"])
+    assert second.name == f"robot-{other[-8:]}.obj" and second.with_suffix(".mtl").is_file()
+    assert user_obj.read_bytes() == b"mtllib my_materials.mtl\nv 9 9 9\n" and user_tex.read_bytes() == b"PNG-USER"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows has no metadata-change time; POSIX ctime catches this edit")
+def test_an_edit_that_restores_size_and_mtime_is_still_the_users(api, monkeypatch):
+    """``cp -p``/``touch -r`` and coarse-mtime filesystems can leave an edited export with its saved size and
+    mtime; it is still never replaced."""
+    other, task = "01a15976-d838-7532-99d8-000000000053", _TASK
+    a = "https://assets.meshy.ai/"
+    rows = {t: {"id": t, "model_urls": {"stl": a + f"{t[-2:]}.stl"}} for t in (other, task)}
+    monkeypatch.setattr(api, "_task", lambda t, _k: rows[t])
+    _fake_assets(monkeypatch, api, {"53.stl": b"OTHER TASK STL", "6c.stl": b"THIS TASK STL"})
+    anchor = Path.home() / "projects" / "edit" / "robot.glb"
+    anchor.parent.mkdir(parents=True)
+    anchor.write_bytes(b"glTF")
+    saved = Path(api.save({"task": task, "format": "stl", "beside": str(anchor)})["path"])
+    before = saved.stat()
+    with open(saved, "r+b") as fh:  # same size, in place
+        fh.write(b"USER")
+    os.utime(saved, ns=(before.st_atime_ns, before.st_mtime_ns))
+    again = Path(api.save({"task": other, "format": "stl", "beside": str(anchor)})["path"])
+    assert saved.read_bytes() == b"USER TASK STL" and again != saved
+
+
+def test_a_dangling_user_symlink_is_never_replaced(api, monkeypatch):
+    a = "https://assets.meshy.ai/"
+    monkeypatch.setattr(api, "_task", lambda t, _k: {"id": t, "model_urls": {"stl": a + "m.stl"}})
+    _fake_assets(monkeypatch, api, {"m.stl": b"MESHY STL"})
+    anchor = Path.home() / "projects" / "link" / "robot.glb"
+    anchor.parent.mkdir(parents=True)
+    anchor.write_bytes(b"glTF")
+    link = anchor.with_suffix(".stl")
+    try:
+        os.symlink(anchor.parent / "elsewhere.stl", link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlinks need privileges on this Windows runner")
+    saved = Path(api.save({"task": _TASK, "format": "stl", "beside": str(anchor)})["path"])
+    assert link.is_symlink() and saved.name == f"robot-{_TASK[-8:]}.stl"
