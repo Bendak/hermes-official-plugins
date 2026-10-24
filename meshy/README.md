@@ -47,32 +47,60 @@ into npm's cache.
 
 Most Meshy tools spend credits (5–62 per call; the skill's `references/tools.md` lists the
 prices). The plugin marks the server `trust: untrusted`, so Hermes asks before every
-write-capable call (creates, downloads, cancels). Each yes covers that one call: in current Hermes
-builds a "for this session" or "always" choice in the prompt (the CLI's session option, the approval
-buttons in Telegram, Discord, Slack and other chat apps) also approves only that call, and the next
-one asks again. Read-only tools (balance, usage, task status and lists, the animation library, slicer
-detection) run without a prompt. The skill also tells the agent to state the cost and get your
-yes before any paid call. Unattended runs (cron, `hermes chat -q`, a gateway with no approver)
-cannot approve, so paid calls are refused there.
+write-capable call (creates, downloads, cancels). Read-only tools (balance, usage, task status and
+lists, the animation library, slicer detection) run without a prompt. The skill also tells the agent
+to state the cost and get your yes before any paid call. Unattended runs (cron, `hermes chat -q`, a
+gateway with no approver) cannot approve, so paid calls are refused there.
 
-To skip the prompts, override the server in `config.yaml` with the same name. A config entry
-replaces the plugin's, trust included, so keep the pinned command:
+What the prompt's answers cover depends on your Hermes build:
 
-```yaml
-mcp_servers:
-  meshy:
-    command: npx
-    args: ["-y", "@meshy-ai/meshy-mcp-server@0.6.5"]
-    env:
-      MESHY_API_KEY: ${MESHY_API_KEY}
-```
+| Answer | Hermes builds after v0.22.5 | v0.22.5 and older |
+|---|---|---|
+| Allow once | this call | this call |
+| Allow for this session | that tool, for the rest of this chat | this call only |
+| Always | that tool, in every chat of this profile (saved to `command_allowlist` as `mcp:meshy/<tool>`, e.g. `mcp:meshy/meshy_text_to_3d`; delete the line to revoke it) | this call only |
 
-On Hermes builds with MCP tool costs, the plugin also declares what each Meshy tool costs (Meshy's
-API price list; ranges where the model or texture size changes the price) and a 200-credit spend
-limit per chat. The approval prompt then reads "Costs about 5–25 credits" plus what the chat has
-spent, and once a chat would pass the limit Hermes asks again even with the prompts skipped as above
-(your override keeps the plugin's costs unless it sets `tool_costs` / `spend_limit` itself;
-`spend_limit: 0` turns the limit off). Older Hermes builds ignore the declaration.
+Each answer covers one tool: allowing `meshy_text_to_3d` does not allow `meshy_rig`.
+
+The plugin also declares what each Meshy tool costs (Meshy's API price list; ranges where the model
+or texture size changes the price) and a 200-credit spend limit per chat. The prompt then reads
+"Costs about 5–25 credits" plus what the chat has spent. A call that would take the chat past the
+limit always asks, even for a tool you allowed for the session or always, and that prompt offers
+only Once or Deny: each further paid call in that chat asks again. Hermes builds without MCP tool
+costs ignore the declaration.
+
+### Full creative control (no prompts)
+
+1. **Skip the trust prompt.** On Hermes builds after v0.22.5, YOLO mode skips it: `/yolo` for the
+   current chat, `hermes --yolo` for that process, or `approvals.mode: off` in `config.yaml` for the
+   whole profile (`HERMES_YOLO_MODE=1` works too). Or answer **Always** once per tool you want to run
+   freely. On v0.22.5 and older, YOLO does not cover MCP trust prompts: use the override in step 2
+   with `trust: full`.
+2. **Raise or remove the spend limit.** YOLO and Always do not lift it. Override the server in
+   `config.yaml` under the same name. A config entry replaces the plugin's whole entry (its working
+   folder and its 1,500 s call timeout included) and keeps only the plugin's declared costs, so
+   repeat what you need:
+
+   ```yaml
+   mcp_servers:
+     meshy:
+       command: npx
+       args: ["-y", "@meshy-ai/meshy-mcp-server@0.6.5"]
+       env:
+         MESHY_API_KEY: ${MESHY_API_KEY}
+       timeout: 1500        # Creative Lab and status waits outlast Hermes' 300 s default
+       spend_limit: 0       # 0 = no per-chat limit; or a number of credits, e.g. 1000
+       # trust: full        # also skip the trust prompt (needed for that on v0.22.5 and older)
+   ```
+
+   `${PLUGIN_DATA}` is not expanded in `config.yaml`, so the override cannot keep the plugin's own
+   working folder. Without `cwd`, a download the agent makes without `save_to` lands in
+   `meshy_output/` in the chat's working directory (the session's terminal folder, else the folder
+   Hermes was started in). The skill always passes an absolute `save_to`, and you can name a
+   folder in your request. To pin one folder, set `cwd: ${userHome}/Meshy` (create it first).
+
+Prompts come back after `/yolo` is turned off, or after you delete the override and the
+`command_allowlist` lines.
 
 ## Long jobs and chat apps
 

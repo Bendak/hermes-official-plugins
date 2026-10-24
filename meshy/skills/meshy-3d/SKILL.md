@@ -46,13 +46,25 @@ setup step from Meshy's docs: the plugin already registers the server, and a sec
 
 The server is marked untrusted, so Hermes asks the user before every call that is not
 read-only (every create, download, cancel). Read-only calls (balance, status, lists, slicer
-detection) run without a prompt. When a call comes back "The user did not approve", stop:
+detection) run without a prompt. On Hermes builds after v0.22.5, the prompt's "for this session"
+answer keeps that one tool allowed for the rest of the chat and "Always" for every chat of the
+profile; on v0.22.5 and older both approve only that call. A call that would take the chat past
+its spend limit (200 credits by default) asks again anyway and offers only Once or Deny.
+When a call comes back "The user did not approve", stop:
 the user declined, or the run is unattended (cron, `chat -q`, a gateway with no approver)
 and cannot approve. Do not retry, inspect config or look for a workaround, and never suggest
 changing the server's trust, editing config or "always allow" as the fix; tell the user the
 exact call you would make and its cost, and that an interactive session (Desktop, CLI, or a
 chat gateway that shows approval buttons) can approve it. For a finished task, the signed link
 from `meshy_get_task_status` (read-only, no prompt) is the way to hand over the file meanwhile.
+
+Only when the USER asks to stop the prompts or for full creative control, tell them their
+options (the plugin README's "Full creative control" section) and let them choose; never change
+any of it yourself: `/yolo` for this chat, `hermes --yolo`, or `approvals.mode: off` for the
+profile (these skip the trust prompt on builds after v0.22.5), or "Always" once per tool; the
+per-chat spend limit is lifted only by a `mcp_servers.meshy` override in `config.yaml` that
+repeats the pinned command, the key passthrough and `timeout: 1500` and sets `spend_limit: 0`
+(off) or a higher number.
 
 ## Quick Reference
 
