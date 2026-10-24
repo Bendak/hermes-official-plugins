@@ -82,11 +82,15 @@ export const TOOL_KIND: Record<string, string> = {
   meshy_image_to_image: 'image-to-image',
   meshy_repair_printability: 'print-repair',
   meshy_auto_split: 'print-split',
-  meshy_process_multicolor: 'print-multi-color'
+  meshy_process_multicolor: 'print-multi-color',
+  meshy_analyze_printability: 'print-analyze'
 }
 /** A status call without `task_type`: the backend finds the task's route itself (cached after the first read). */
 export const ANY_KIND = 'any'
-const KIND = /^[a-z0-9-]{1,48}$/
+/** `task_type` values the backend maps to a route (meshy_get_task_status's enum, minus Creative Lab). */
+const STATUS_KINDS = new Set([
+  ...Object.values(TOOL_KIND), 'multi-color-print', 'print-analyze'
+])
 const TASK_ID = /^[0-9a-f][0-9a-f-]{15,63}$/
 
 const bare = (name: unknown) => String(name ?? '').replace(/^(mcp__meshy__|mcp_meshy_)/, '')
@@ -182,7 +186,8 @@ export function awaitedTasks(name: unknown, args: unknown): Array<[string, strin
     if (c.tool !== 'meshy_get_task_status' || typeof id !== 'string' || !TASK_ID.test(id)) {
       return []
     }
-    const kind = typeof c.args.task_type === 'string' && KIND.test(c.args.task_type) ? c.args.task_type : ANY_KIND
+    // Meshy's server tolerates a wrong task_type; anything that is not a route name is looked up instead.
+    const kind = typeof c.args.task_type === 'string' && STATUS_KINDS.has(c.args.task_type) ? c.args.task_type : ANY_KIND
     return [[kind, id] as [string, string]]
   })
 }
@@ -225,6 +230,7 @@ export function createProgressTracker(
   let failures = 0
   let stopped = false
   let disposed = false
+  let generation = 0 // bumped on a profile/connection switch: a reply read through the old one is dropped
 
   const set = (patch: Partial<ProgressState>) => {
     const wasBusy = state.running || state.tasks.length > 0
@@ -273,12 +279,13 @@ export function createProgressTracker(
     }
     inFlight = true
     let next = ACTIVE_POLL_MS
+    const at = generation
     const query = list.map(([id, w]) => `${w.kind}:${id}`).join(',')
     ctx
       .rest<ActiveReply>(`active?tasks=${encodeURIComponent(query)}`, { timeoutMs: 15_000 })
       .then(
         res => {
-          if (disposed) return
+          if (disposed || at !== generation) return
           failures = 0
           const now = clock.now()
           for (const id of Array.isArray(res.done) ? res.done : []) watched.delete(id)
@@ -290,7 +297,7 @@ export function createProgressTracker(
           set({ tasks: rows })
         },
         (err: unknown) => {
-          if (disposed) return
+          if (disposed || at !== generation) return
           failures += 1
           // A whole-request 404 is an old or missing backend route: permanent like any other 4xx.
           if (classifyFailure(httpStatus(err), Infinity) === 'permanent' || failures >= MAX_FAILURES) {
@@ -358,6 +365,7 @@ export function createProgressTracker(
     watching: () => [...watched.keys()],
     /** The profile/connection in front changed: drop rows read through the old one and poll what the new one owns. */
     rescope() {
+      generation += 1
       if (state.tasks.length) {
         set({ tasks: [] })
       }

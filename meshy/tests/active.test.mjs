@@ -114,6 +114,8 @@ test('a create call is watched by id, one task per poll, until Meshy reports it 
 test('a status call names the task it waits on, with its type', () => {
   assert.deepEqual(awaitedTasks('tool_call', bridged('get_task_status', { task_id: ID, task_type: 'rigging' })), [['rigging', ID]])
   assert.deepEqual(awaitedTasks('mcp_meshy_meshy_get_task_status', { task_id: ID }), [['any', ID]])
+  // Meshy's server tolerates a wrong task_type; the backend then looks the task up instead of refusing the batch.
+  assert.deepEqual(awaitedTasks('mcp_meshy_meshy_get_task_status', { task_id: ID, task_type: 'preview' }), [['any', ID]])
   assert.deepEqual(awaitedTasks('mcp_meshy_meshy_get_task_status', { task_id: 'not-an-id' }), [])
   assert.deepEqual(startedTasks('mcp_meshy_meshy_rig', {}, `**Task ID**: ${ID}`), [['rigging', ID]])
   assert.deepEqual(startedTasks('mcp_meshy_meshy_check_balance', {}, `**Task ID**: ${ID}`), [])
@@ -167,4 +169,17 @@ test("another profile's task is not polled through the front profile's key", asy
   r.emit('tool.complete', { name: 'mcp_meshy_meshy_text_to_3d', args: {}, result: `**Task ID**: ${ID2}` }, { profile: 'default' })
   await r.advance(1000)
   assert.deepEqual(r.calls, [`active?tasks=${encodeURIComponent(`text-to-3d:${ID2}`)}`])
+})
+
+test('a reply read through the previous profile is dropped after a switch', async () => {
+  const r = rig()
+  let release
+  r.setReply(() => new Promise(resolve => (release = resolve)))
+  r.emit('tool.complete', { name: 'mcp_meshy_meshy_text_to_3d', args: {}, result: `**Task ID**: ${ID}` })
+  await r.advance(1000)
+  assert.equal(r.calls.length, 1)
+  r.tracker.rescope()
+  release({ tasks: [running(ID, 50)], done: [], missing: [] })
+  for (let i = 0; i < 3; i++) await new Promise(resolve => setImmediate(resolve))
+  assert.equal(r.states.at(-1).tasks.length, 0)
 })

@@ -61,10 +61,11 @@ from `meshy_get_task_status` (read-only, no prompt) is the way to hand over the 
 Only when the USER asks to stop the prompts or for full creative control, tell them their
 options (the plugin README's "Full creative control" section) and let them choose; never change
 any of it yourself: `/yolo` for this chat, `hermes --yolo`, or `approvals.mode: off` for the
-profile (these skip the trust prompt on builds after v0.22.5), or "Always" once per tool; the
+profile (these skip the trust prompt on builds after v0.22.5), or "Always" once per tool. The
 per-chat spend limit is lifted only by a `mcp_servers.meshy` override in `config.yaml` that
 repeats the pinned command, the key passthrough and `timeout: 1500` and sets `spend_limit: 0`
-(off) or a higher number.
+(off) or a higher number. That override also drops the trust prompt unless it keeps
+`trust: untrusted`, so say so when the user only wants a higher limit.
 
 ## Quick Reference
 

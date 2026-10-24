@@ -74,12 +74,12 @@ costs ignore the declaration.
 1. **Skip the trust prompt.** On Hermes builds after v0.22.5, YOLO mode skips it: `/yolo` for the
    current chat, `hermes --yolo` for that process, or `approvals.mode: off` in `config.yaml` for the
    whole profile (`HERMES_YOLO_MODE=1` works too). Or answer **Always** once per tool you want to run
-   freely. On v0.22.5 and older, YOLO does not cover MCP trust prompts: use the override in step 2
-   with `trust: full`.
+   freely. On any build, the override in step 2 also drops it, unless it keeps `trust: untrusted`.
 2. **Raise or remove the spend limit.** YOLO and Always do not lift it. Override the server in
-   `config.yaml` under the same name. A config entry replaces the plugin's whole entry (its working
-   folder and its 1,500 s call timeout included) and keeps only the plugin's declared costs, so
-   repeat what you need:
+   `config.yaml` under the same name. A config entry replaces the plugin's whole entry: its
+   `trust: untrusted` (an entry without `trust` is fully trusted, so no trust prompt), its working
+   folder and its 1,500 s call timeout. Only the plugin's declared costs and its 200-credit limit
+   carry over, unless the entry sets them. So repeat what you want to keep:
 
    ```yaml
    mcp_servers:
@@ -90,7 +90,7 @@ costs ignore the declaration.
          MESHY_API_KEY: ${MESHY_API_KEY}
        timeout: 1500        # Creative Lab and status waits outlast Hermes' 300 s default
        spend_limit: 0       # 0 = no per-chat limit; or a number of credits, e.g. 1000
-       # trust: full        # also skip the trust prompt (needed for that on v0.22.5 and older)
+       trust: untrusted     # keeps the per-call prompt; delete this line for no prompts at all
    ```
 
    `${PLUGIN_DATA}` is not expanded in `config.yaml`, so the override cannot keep the plugin's own

@@ -434,7 +434,7 @@ def test_progress_chip_reads_only_the_tasks_it_names(api, meshy):
     assert len(meshy.meshy_hits()) == 2  # the "any" task's route is cached after its first read
 
 
-@pytest.mark.parametrize("tasks", ["text-to-3d", f"nope:{_tid(1)}", f"text-to-3d:{_tid(1)}/../balance", "any:../../v1/balance",
+@pytest.mark.parametrize("tasks", ["text-to-3d", f"Text:{_tid(1)}", f"text-to-3d:{_tid(1)}/../balance", "any:../../v1/balance",
                                    ",".join(f"text-to-3d:{_tid(i)}" for i in range(9))])
 def test_progress_chip_input_is_checked_before_any_meshy_call(api, meshy, tasks):
     assert _status(api.active, tasks=tasks).status_code == 400
@@ -454,3 +454,23 @@ def test_status_names_a_403_refusal_instead_of_blaming_the_key(api, meshy):
     assert api.status()["error"] == "Meshy refused the request: ip_not_authorized: 203.0.113.9"
     meshy.overrides = {"/openapi/v1/balance": (401, {}, b"{}")}
     assert api.status()["error"] == "Meshy rejected the API key"
+
+
+def test_progress_chip_finds_a_task_named_with_a_wrong_kind(api, meshy):
+    # Meshy's server accepts a wrong task_type on a status call; one such entry must not fail the whole batch.
+    task = meshy.add("text-to-motion", 35, status="IN_PROGRESS", progress=70)
+    got = api.active(tasks=f"preview:{task}")
+    assert [(t["task_id"], t["task_type"]) for t in got["tasks"]] == [(task, "text-to-motion")]
+
+
+def test_progress_chip_lookups_never_starve_the_shared_probe_slots(api, meshy):
+    """Four lookups of ids no generic route knows run _task's own fan-out; they must finish, and a card's
+    lookup alongside them too (holding a shared slot while waiting for one deadlocked every probe)."""
+    from concurrent.futures import ThreadPoolExecutor
+    ids = [meshy.add("text-to-motion", 40 + i, status="IN_PROGRESS") for i in range(api._ACTIVE_MAX)]
+    card = meshy.add("creative-lab-figure-build", 49, model_urls={"glb": _asset(meshy, "f.glb")})
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        chip = pool.submit(api.active, tasks=",".join(f"any:{i}" for i in ids))
+        state = pool.submit(api.task_state, card)
+        assert len(chip.result(timeout=60)["tasks"]) == api._ACTIVE_MAX
+        assert state.result(timeout=60)["has_model"]
