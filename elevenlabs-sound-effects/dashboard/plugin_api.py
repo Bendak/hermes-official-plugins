@@ -141,8 +141,12 @@ def _refused(row: dict) -> HTTPException | None:
     name = row.get("file_name")
     if not isinstance(name, str) or not _prov.AUDIO_NAME_RE.fullmatch(name):
         return None
+    path = _prov.audio_dir() / name
     try:
-        links = (_prov.audio_dir() / name).lstat().st_nlink
+        if path.is_symlink():
+            return HTTPException(status_code=410, detail=(
+                "the sound file was replaced by a symbolic link, so this plugin won't serve it"))
+        links = path.lstat().st_nlink
     except OSError:
         return None
     if links > 1:

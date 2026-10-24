@@ -163,9 +163,10 @@ the file names).
    - The file path appears ONLY on its `MEDIA:` line, never in prose, or messaging apps send it twice.
      Markdown links and images are not delivered.
    - Always deliver the generated sound's own `media_tag`, even when you also converted or processed
-     it: that line is the sound card in Desktop (its Download menu converts to OGG, WAV and MP3 on
-     its own). Files you made from it (a `loopfix` result, a conversion, a pack zip) go on their own
-     `MEDIA:<abs path>` lines after it; say which one to use for what.
+     it: where Desktop shows plugin media cards, that line is the sound card (play, loop audition,
+     and downloads in other formats when the Hermes host has ffmpeg). Files you made from it (a
+     `loopfix` result, a conversion, a pack zip) go on their own `MEDIA:<abs path>` lines after it,
+     so messaging apps receive both files; say which one to use for what.
    Completion: every sound produced is on exactly one `MEDIA:` line.
 6. A sound pack: generate each sound (steps 3-4), then run `pack`; deliver the zip on its own
    `MEDIA:` line, plus the manifest summary. Completion: the zip exists and

@@ -182,6 +182,8 @@ def test_bad_ids_and_records_never_reach_files_outside_the_audio_folder(api, _he
     if hard:  # still on disk: the answer says why it isn't served instead of calling it gone
         assert "hard link" in refused.json()["detail"]
     assert "no longer" in client.get("/audio?id=bbbbbbbbbbbb").json()["detail"]
+    if link:
+        assert "symbolic link" in client.get("/audio?id=aaaaaaaaaaaa").json()["detail"]
     rows = {r["id"]: r for r in client.get("/sounds").json()["sounds"]}
     assert rows["aaaaaaaaaaaa"]["exists"] is False and rows["bbbbbbbbbbbb"]["path"] is None
     assert client.get("/audio?id=../../x").status_code == 400
