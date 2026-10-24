@@ -500,7 +500,7 @@ export function ModelViewer({
 const FORMAT_LABEL: Record<string, string> = {
   glb: 'GLB · web, Blender, three.js',
   fbx: 'FBX · Unity, Unreal, Maya',
-  obj: 'OBJ · with .mtl + texture',
+  obj: 'OBJ · Blender, Maya, most 3D tools',
   stl: 'STL · 3D printing',
   usdz: 'USDZ · Apple AR Quick Look',
   '3mf': '3MF · 3D printing',

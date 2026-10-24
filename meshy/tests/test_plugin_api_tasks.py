@@ -620,3 +620,48 @@ def test_details_keeps_the_recorded_lineage_when_only_meshys_record_fails(api, m
     assert (api.details(task)["session_id"], api.details(task)["remote_error"]) == ("sess-1", "Meshy API error 502")
     meshy.overrides = {f"{_ROUTES['creative-lab-lamp-build']}/{task}": (401, {}, b"{}")}
     assert _status(api.details, task).detail == "Meshy rejected the API key"
+
+
+def test_concurrent_lookups_of_an_unknown_task_probe_every_route_once_in_total(api, meshy, monkeypatch):
+    """A card mounting twice, the chip and a retry ask for the same unknown id together: one probe of every route,
+    not one per caller (live: 4 callers x 34 routes in 5 s drew Meshy 429s past its 20 req/s per key)."""
+    real, gate = api._meshy_get, threading.Barrier(4, timeout=10)
+
+    def slow(*args, **kwargs):  # Meshy's latency: every caller arrives before the first verdict
+        threading.Event().wait(0.02)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(api, "_meshy_get", slow)
+    unknown = _tid(4242)
+
+    def ask():
+        gate.wait()
+        return _status(api.task_state, unknown).status_code
+
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        codes = list(pool.map(lambda _i: ask(), range(4)))
+    assert codes == [404] * 4
+    assert len(meshy.meshy_hits()) == len(set(_ROUTES.values()))
+
+
+def test_made_from_never_shows_a_type_named_project_or_credits_the_task_itself(api, meshy):
+    """The Meshy MCP server names a prompt-less project after its task type (``convert``) and starts its chain at
+    that task: Made-from shows no prompt rather than \"convert (from the original <itself>)\"."""
+    task = meshy.add("convert", 80, model_urls={"3mf": _asset(meshy, "m.3mf")})
+    folder = api.data / "meshy_output" / f"20261024_044847_convert_{task[:8]}"
+    folder.mkdir(parents=True)
+    (folder / "metadata.json").write_text(json.dumps(
+        {"project_name": "convert", "tasks": [{"task_id": task, "task_type": "convert", "stage": ""}]}), encoding="utf-8")
+    got = api.details(task)
+    assert (got["prompt"], got["prompt_from"]) == (None, None)
+    # Control: a project named after its prompt still lends it to a later step, credited to the first task.
+    preview = meshy.add("text-to-3d-preview", 81, model_urls={"glb": _asset(meshy, "p.glb")})
+    remesh = meshy.add("remesh", 82, model_urls={"glb": _asset(meshy, "r.glb")})
+    other = api.data / "meshy_output" / "20261024_050000_barrel"
+    other.mkdir(parents=True)
+    (other / "metadata.json").write_text(json.dumps({"project_name": "a small wooden barrel", "tasks": [
+        {"task_id": preview, "task_type": "text-to-3d", "stage": "preview"},
+        {"task_id": remesh, "task_type": "remesh", "stage": ""}]}), encoding="utf-8")
+    got = api.details(remesh)
+    assert (got["prompt"], got["prompt_from"]) == ("a small wooden barrel", preview)
