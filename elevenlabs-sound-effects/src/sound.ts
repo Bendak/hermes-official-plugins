@@ -59,6 +59,13 @@ export function bytesLabel(n: null | number): string {
 export const secondsLabel = (s: null | number | undefined): string =>
   typeof s === 'number' && Number.isFinite(s) ? `${s < 10 ? s.toFixed(2).replace(/\.?0+$/, '') : Math.round(s)} s` : 'auto length'
 
+/** A playback clock: `0:01.5`, `1:04.0`. */
+export function clockLabel(seconds: number): string {
+  const t = Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 10) / 10 : 0
+  const m = Math.floor(t / 60)
+  return `${m}:${(t - m * 60).toFixed(1).padStart(4, '0')}`
+}
+
 /** The Length chip: the real length (decoded here, else the tool's measurement), plus what was asked for
  *  when ElevenLabs returned a different length (it bills the request). */
 export function lengthLabel(rec: Pick<SoundRecord, 'duration_seconds' | 'length_seconds'>, decoded: null | number): string {

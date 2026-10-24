@@ -8,7 +8,7 @@ import { type ReactNode, useEffect, useState } from 'react'
 
 import { backendIsRemote, errorText, onScopeChange, statusOf } from './audio.ts'
 import { billed, formatLabel, type HostInfo, lengthLabel, modelLabel, SOUND_ID, soundIdOf, type SoundRecord } from './sound.ts'
-import { Chip, DownloadMenu, NextMenu, S, Transport, useSound, Waveform, Where } from './ui.tsx'
+import { Chip, Clock, DownloadMenu, NextMenu, S, T, Transport, useSound, Waveform, Where } from './ui.tsx'
 
 const AUTO_LOAD_BYTES = 4 * 1024 * 1024
 
@@ -149,11 +149,14 @@ function ReadyCard({
   return (
     <div data-sfx-card="ready" data-sfx-id={rec.id} style={S.card}>
       <div style={{ ...S.row, justifyContent: 'space-between', alignItems: 'flex-start' }}>
-        <span style={S.prompt}>
-          <Codicon name="unmute" /> {rec.prompt}
+        <span style={{ ...S.prompt, display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <span style={{ color: T.accent, lineHeight: 1 }}>
+            <Codicon name="unmute" />
+          </span>
+          <span>{rec.prompt}</span>
         </span>
-        <Button aria-label="Open the sound library" onClick={onOpenLibrary} size="icon" title="Sound library" variant="ghost">
-          <Codicon name="library" />
+        <Button aria-label="Open the sound library" data-sfx-open-library="" onClick={onOpenLibrary} size="sm" title="Every sound made in this profile" variant="ghost">
+          <Codicon name="library" /> Library
         </Button>
       </div>
       <div style={S.row}>
@@ -180,9 +183,10 @@ function ReadyCard({
       )}
       <div style={S.row}>
         <Transport sound={sound} />
+        <Clock sound={sound} />
+        <span style={{ flex: 1 }} />
         <DownloadMenu ctx={ctx} info={info} rec={rec} />
         <Where ctx={ctx} info={info} rec={rec} remote={remote} />
-        <span style={{ flex: 1 }} />
         <NextMenu directiveSession={sessionId} measured={sound.duration} rec={rec} />
       </div>
     </div>

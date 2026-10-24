@@ -17,9 +17,12 @@ import {
   lengthLabel,
   type SoundRecord
 } from './sound.ts'
-import { Chip, DownloadMenu, S, Transport, useSound, Waveform, Where } from './ui.tsx'
+import { Chip, DownloadMenu, S, T, Transport, useSound, Waveform, Where } from './ui.tsx'
 
 const PAGE = 200
+// The newest few rows load their audio up front so their waveforms show; the rest load on Play.
+const AUTO_LOAD_ROWS = 6
+const AUTO_LOAD_BYTES = 2 * 1024 * 1024
 
 interface Library extends HostInfo {
   sounds: SoundRecord[]
@@ -29,18 +32,27 @@ interface Library extends HostInfo {
 }
 
 const L = {
-  pane: { display: 'flex', flexDirection: 'column', gap: 10, padding: 14, height: '100%', overflow: 'auto', color: 'var(--color-foreground)' },
+  pane: { height: '100%', overflow: 'auto', color: T.text },
+  column: { display: 'flex', flexDirection: 'column', gap: 10, padding: 16, maxWidth: 960, margin: '0 auto' },
   input: {
     flex: 1,
     minWidth: 160,
-    background: 'var(--color-background)',
-    color: 'var(--color-foreground)',
-    border: '1px solid var(--color-border)',
-    borderRadius: 6,
-    padding: '4px 8px',
+    background: T.input,
+    color: T.text,
+    border: `1px solid ${T.border}`,
+    borderRadius: 8,
+    padding: '5px 10px',
     fontSize: 13
   },
-  row: { border: '1px solid var(--color-border)', borderRadius: 8, padding: '8px 10px', display: 'flex', flexDirection: 'column', gap: 6 }
+  row: {
+    border: `1px solid ${T.border}`,
+    background: T.card,
+    borderRadius: 10,
+    padding: '10px 12px',
+    display: 'flex',
+    flexDirection: 'column',
+    gap: 8
+  }
 } as const
 
 /**
@@ -94,6 +106,7 @@ export function SoundLibrary({ ctx, refreshSignal }: { ctx: PluginContext; refre
 
   return (
     <div data-sfx-library="" style={L.pane as React.CSSProperties}>
+      <div style={L.column as React.CSSProperties}>
       <div style={{ ...S.row, justifyContent: 'space-between' }}>
         <strong style={{ fontSize: 15 }}>
           <Codicon name="library" /> Sound library
@@ -160,8 +173,8 @@ export function SoundLibrary({ ctx, refreshSignal }: { ctx: PluginContext; refre
             <span style={S.muted}>No sounds match.</span>
           ) : (
             <>
-              {shown.slice(0, shownCount).map(rec => (
-                <LibraryRow ctx={ctx} info={data} key={rec.id} rec={rec} remote={remote} />
+              {shown.slice(0, shownCount).map((rec, i) => (
+                <LibraryRow autoLoad={i < AUTO_LOAD_ROWS} ctx={ctx} info={data} key={rec.id} rec={rec} remote={remote} />
               ))}
               {shown.length > shownCount && (
                 <Button onClick={() => setShownCount(c => c + PAGE)} size="sm" variant="outline">
@@ -173,12 +186,29 @@ export function SoundLibrary({ ctx, refreshSignal }: { ctx: PluginContext; refre
         </>
       )}
       {!data && !error && <span style={S.muted}>Loading…</span>}
+      </div>
     </div>
   )
 }
 
-function LibraryRow({ ctx, rec, info, remote }: { ctx: PluginContext; rec: SoundRecord; info: HostInfo; remote: boolean | null }) {
+function LibraryRow({
+  ctx,
+  rec,
+  info,
+  remote,
+  autoLoad
+}: {
+  ctx: PluginContext
+  rec: SoundRecord
+  info: HostInfo
+  remote: boolean | null
+  autoLoad: boolean
+}) {
   const sound = useSound(ctx, rec, `lib:${rec.id}`)
+  useEffect(() => {
+    if (autoLoad && rec.exists && (rec.size ?? 0) <= AUTO_LOAD_BYTES) void sound.load()
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- once per record
+  }, [rec.id, autoLoad])
   const cost = billed(rec)
   const date = rec.created_at ? new Date(rec.created_at) : null
   const reuse = async () => {
@@ -199,9 +229,14 @@ function LibraryRow({ ctx, rec, info, remote }: { ctx: PluginContext; rec: Sound
   }
   return (
     <div data-sfx-row={rec.kind} style={L.row as React.CSSProperties}>
-      <div style={{ ...S.row, alignItems: 'flex-start' }}>
+      <div style={{ ...S.row, flexWrap: 'nowrap' }}>
         <Transport compact sound={sound} />
         <span style={{ ...S.prompt, flex: 1 }}>{rec.prompt}</span>
+        {date && !Number.isNaN(date.getTime()) && (
+          <span style={{ ...S.muted, whiteSpace: 'nowrap' }} title={date.toLocaleString()}>
+            {date.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })}
+          </span>
+        )}
       </div>
       {sound.loaded.state === 'ready' && <Waveform data={sound.loaded.wave} height={30} onSeek={f => void sound.seek(f)} progress={sound.progress} />}
       {sound.loaded.state === 'error' && <span style={S.error}>{sound.loaded.message}</span>}
@@ -209,14 +244,10 @@ function LibraryRow({ ctx, rec, info, remote }: { ctx: PluginContext; rec: Sound
         <Chip>{lengthLabel(rec, sound.duration)}</Chip>
         {rec.loop && <Chip>loopable</Chip>}
         <Chip title={rec.model ?? ''}>{modelLabel(rec.model)}</Chip>
-        <Chip>{formatLabel(rec.output_format)}</Chip>
-        {typeof rec.prompt_influence === 'number' && <Chip title="prompt_influence">influence {rec.prompt_influence}</Chip>}
+        <Chip title={rec.size != null ? bytesLabel(rec.size) : undefined}>{formatLabel(rec.output_format)}</Chip>
         {cost != null && <Chip>{cost} credits</Chip>}
-        {rec.size != null && <Chip>{bytesLabel(rec.size)}</Chip>}
-        {date && !Number.isNaN(date.getTime()) && <span style={S.muted}>{date.toLocaleString()}</span>}
-      </div>
-      <div style={S.row}>
-        <Button data-sfx-reuse="" onClick={() => void reuse()} size="sm" variant="outline">
+        <span style={{ flex: 1 }} />
+        <Button data-sfx-reuse="" onClick={() => void reuse()} size="sm" title="Put this prompt in the composer" variant="outline">
           <Codicon name="edit" /> Reuse prompt
         </Button>
         <Button

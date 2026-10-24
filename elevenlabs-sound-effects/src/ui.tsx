@@ -14,33 +14,50 @@ import {
 import { type CSSProperties, type ReactNode, useEffect, useId, useRef, useState } from 'react'
 
 import { errorText, fetchAudio, loadSound, player, saveDownload, SEND_FAILED, sendToChat } from './audio.ts'
-import { type HostInfo, kindLabel, nextActions, type SoundRecord } from './sound.ts'
+import { clockLabel, type HostInfo, kindLabel, nextActions, type SoundRecord } from './sound.ts'
+
+// Desktop's documented theme variables for plugins (`--ui-*`), so the card reskins with every theme.
+// The `--color-*` names exist only inside Desktop's own Tailwind build, not as CSS variables.
+export const T = {
+  text: 'var(--ui-text-primary)',
+  secondary: 'var(--ui-text-secondary)',
+  muted: 'var(--ui-text-tertiary)',
+  faint: 'var(--ui-text-quaternary)',
+  border: 'var(--ui-stroke-secondary)',
+  card: 'var(--ui-bg-card)',
+  chip: 'var(--ui-bg-tertiary)',
+  input: 'var(--ui-bg-input)',
+  accent: 'var(--ui-accent)',
+  danger: 'var(--ui-red)'
+} as const
 
 export const S = {
   card: {
-    border: '1px solid var(--color-border)',
-    borderRadius: 10,
-    background: 'var(--color-card)',
-    color: 'var(--color-foreground)',
-    padding: '10px 12px',
-    margin: '6px 0',
-    maxWidth: 560,
+    border: `1px solid ${T.border}`,
+    borderRadius: 12,
+    background: T.card,
+    color: T.text,
+    padding: '12px 14px',
+    margin: '8px 0',
+    maxWidth: 600,
     display: 'flex',
     flexDirection: 'column',
-    gap: 8
+    gap: 10
   } as CSSProperties,
   row: { display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' } as CSSProperties,
-  muted: { color: 'var(--color-muted-foreground)', fontSize: 12 } as CSSProperties,
+  muted: { color: T.muted, fontSize: 12 } as CSSProperties,
   chip: {
-    border: '1px solid var(--color-border)',
     borderRadius: 999,
-    padding: '1px 8px',
+    padding: '2px 9px',
     fontSize: 11,
-    color: 'var(--color-muted-foreground)',
+    lineHeight: '16px',
+    background: T.chip,
+    color: T.secondary,
     whiteSpace: 'nowrap'
   } as CSSProperties,
-  error: { color: 'var(--color-destructive, #d33)', fontSize: 12 } as CSSProperties,
-  prompt: { fontSize: 13, lineHeight: 1.35, overflowWrap: 'anywhere' } as CSSProperties
+  error: { color: T.danger, fontSize: 12 } as CSSProperties,
+  prompt: { fontSize: 13.5, fontWeight: 500, lineHeight: 1.4, overflowWrap: 'anywhere', color: T.text } as CSSProperties,
+  time: { color: T.muted, fontSize: 12, fontVariantNumeric: 'tabular-nums', padding: '0 4px', whiteSpace: 'nowrap' } as CSSProperties
 }
 
 export function Chip({ children, title }: { children: ReactNode; title?: string }) {
@@ -51,9 +68,11 @@ export function Chip({ children, title }: { children: ReactNode; title?: string 
   )
 }
 
-/** Clickable waveform with a progress fill; seeking calls `onSeek(fraction)`. */
+/** Clickable waveform with a progress fill and playhead; seeking calls `onSeek(fraction)`. */
 export function Waveform({ data, progress, onSeek, height = 44 }: { data: number[]; progress: number; onSeek: (f: number) => void; height?: number }) {
   const width = data.length * 3
+  // Peaks scaled to the loudest bucket: a quiet sound still draws a readable shape.
+  const top = Math.max(0.05, ...data)
   return (
     <svg
       aria-label="Waveform; click to seek"
@@ -68,21 +87,11 @@ export function Waveform({ data, progress, onSeek, height = 44 }: { data: number
       viewBox={`0 0 ${width} ${height}`}
     >
       {data.map((v, i) => {
-        const h = Math.max(1.5, v * (height - 4))
+        const h = Math.max(2, (v / top) * (height - 4))
         const played = i / data.length < progress
-        return (
-          <rect
-            fill={played ? 'var(--color-ring)' : 'var(--color-muted-foreground)'}
-            height={h}
-            key={i}
-            opacity={played ? 1 : 0.55}
-            rx={1}
-            width={2}
-            x={i * 3}
-            y={(height - h) / 2}
-          />
-        )
+        return <rect fill={played ? T.accent : T.muted} height={h} key={i} rx={1} width={2} x={i * 3} y={(height - h) / 2} />
       })}
+      {progress > 0 && progress < 1 && <rect fill={T.accent} height={height} width={1} x={progress * width} y={0} />}
     </svg>
   )
 }
@@ -161,6 +170,16 @@ export function useSound(ctx: PluginContext, rec: null | SoundRecord, ownerPrefi
   return { loaded, load, toggle, seek, playing, loop, setLooping, duration, progress }
 }
 
+/** Playback position and length, e.g. `0:00.4 / 0:01.0`. */
+export function Clock({ sound }: { sound: ReturnType<typeof useSound> }) {
+  if (sound.duration == null) return null
+  return (
+    <span data-sfx-clock="" style={S.time}>
+      {clockLabel(sound.duration * sound.progress)} / {clockLabel(sound.duration)}
+    </span>
+  )
+}
+
 export function Transport({ sound, compact }: { sound: ReturnType<typeof useSound>; compact?: boolean }) {
   return (
     <>
@@ -170,7 +189,7 @@ export function Transport({ sound, compact }: { sound: ReturnType<typeof useSoun
         disabled={sound.loaded.state === 'loading'}
         onClick={() => void sound.toggle()}
         size="sm"
-        variant="outline"
+        variant={compact ? 'outline' : 'default'}
       >
         <Codicon name={sound.loaded.state === 'loading' ? 'loading' : sound.playing ? 'debug-pause' : 'play'} spinning={sound.loaded.state === 'loading'} />
         {!compact && (sound.playing ? 'Pause' : 'Play')}
@@ -259,7 +278,7 @@ export function Where({ ctx, rec, info, remote }: { ctx: PluginContext; rec: Sou
           })
         }}
         size="sm"
-        variant="ghost"
+        variant="outline"
       >
         <Codicon name="folder-opened" />
         Reveal

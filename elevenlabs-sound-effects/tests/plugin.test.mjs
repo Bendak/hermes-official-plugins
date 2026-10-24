@@ -100,3 +100,13 @@ test('an older Desktop without the seam loads the plugin and keeps its built-in 
   assert.ok(registered.some(c => c.area === 'palette'))
   assert.ok(!events.includes('tool.start'))
 })
+
+test('every theme colour comes from Desktop\u2019s documented plugin variables (--ui-*)', async () => {
+  // Desktop compiles its own --color-* tokens into its stylesheet (Tailwind `@theme inline`), so a plugin
+  // reading var(--color-border) gets nothing: the card lost its border and its waveform colours that way.
+  const out = await build({ entryPoints: [`${root}src/plugin.tsx`], bundle: true, format: 'esm', jsx: 'automatic', write: false, external: ['@hermes/plugin-sdk', 'react', 'react/jsx-runtime'], logLevel: 'error' })
+  const code = Buffer.from(out.outputFiles[0].contents).toString()
+  const used = [...new Set([...code.matchAll(/var\((--[a-z0-9-]+)/g)].map(m => m[1]))]
+  assert.ok(used.length > 3, `found ${used}`)
+  assert.deepEqual(used.filter(v => !v.startsWith('--ui-')), [])
+})

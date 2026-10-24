@@ -3,6 +3,7 @@ import assert from 'node:assert/strict'
 import { test } from 'node:test'
 
 import {
+  clockLabel,
   isSoundToolCall,
   lengthLabel,
   matches,
@@ -164,4 +165,12 @@ test('Next asks the agent for the MEDIA: line, never a card directive', () => {
     assert.match(a.message, /media_tag line/)
     assert.doesNotMatch(a.message, /sound card|desktop_card|::elevenlabs/)
   }
+})
+
+test('the card clock reads position and length in tenths', () => {
+  assert.equal(clockLabel(0), '0:00.0')
+  assert.equal(clockLabel(0.44), '0:00.4')
+  assert.equal(clockLabel(59.96), '1:00.0') // rounds into the next minute, never 0:60.0
+  assert.equal(clockLabel(64.25), '1:04.3')
+  assert.equal(clockLabel(Number.NaN), '0:00.0')
 })
