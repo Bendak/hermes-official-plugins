@@ -1014,9 +1014,10 @@ def _active_wanted(tasks: str) -> list[tuple[str, str]]:
     wanted: dict[str, str] = {}
     for item in filter(None, (part.strip() for part in tasks.split(","))):
         m = _ACTIVE_ITEM.fullmatch(item)
-        if not m or not (m.group(1) == "any" or _route_for(m.group(1))):
+        if not m:
             raise HTTPException(status_code=400, detail="tasks must be kind:task_id pairs")
-        wanted.setdefault(m.group(2), m.group(1))
+        # A kind with no route (a status call's wrong task_type; Meshy's server tolerates those) is found by lookup.
+        wanted.setdefault(m.group(2), m.group(1) if _route_for(m.group(1)) else "any")
     if len(wanted) > _ACTIVE_MAX:
         raise HTTPException(status_code=400, detail=f"at most {_ACTIVE_MAX} tasks")
     return [(kind, task_id) for task_id, kind in wanted.items()]
@@ -1050,7 +1051,11 @@ def active(tasks: str = ""):
         return {"configured": False, "tasks": [], "done": [], "missing": []}
     wanted = _active_wanted(tasks)
     running, done, missing = [], [], []
-    for (kind, task_id), found in zip(wanted, _fan_out(lambda w: _active_read(*w, key), wanted)):
+    # Not _fan_out: an "any" read runs _task, whose probe takes _FANOUT_SLOTS itself, so holding a slot out here
+    # would let four such reads hold every slot while each waits for one (every probe in the process hangs).
+    with ThreadPoolExecutor(max_workers=_FANOUT) as pool:
+        reads = [pool.submit(_active_read, kind, task_id, key) for kind, task_id in wanted]
+    for (kind, task_id), found in zip(wanted, reads):
         row = found.result()  # HTTPException (403 refused key, 502 outage) reaches the chip, which stops or backs off
         if row is not None and kind == "any":
             kind = _TYPE_ENDPOINT.get(str(row.get("type") or ""), str(row.get("type") or "any"))
