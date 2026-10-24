@@ -565,3 +565,53 @@ def test_progress_chip_lookups_never_starve_the_shared_probe_slots(api, meshy, m
             for _ in range(256):
                 sem.release()
         pool.shutdown(wait=True, cancel_futures=True)
+
+
+def test_one_products_failed_list_never_fails_the_gallery(api, meshy):
+    """Only a refusal of the key fails /models. A plan-gated product (403) or one route's outage is named per
+    product in ``failed`` and every other product still lists."""
+    shown = meshy.add("text-to-3d-preview", 70, model_urls={"glb": _asset(meshy, "a.glb")})
+    image = meshy.add("text-to-image", 71, image_urls=[_asset(meshy, "a.png")])
+    meshy.add("creative-lab-lamp-build", 72, model_urls={"glb": _asset(meshy, "l.glb")})
+    meshy.add("remesh", 73, model_urls={"glb": _asset(meshy, "r.glb")})
+    meshy.overrides = {_ROUTES["creative-lab-lamp-build"]: (403, {}, b'{"message": "Your plan does not include Creative Lab"}'),
+                       _ROUTES["remesh"]: (503, {}, b"{}")}
+    got = api.models(limit=10)
+    assert {m["task_id"] for m in got["models"]} == {shown, image}
+    assert sorted((f["task_type"], f["error"]) for f in got["failed"]) == [
+        ("creative-lab-lamp-build", "Meshy refused the request: Your plan does not include Creative Lab"),
+        ("remesh", "Meshy API error 503")]
+    meshy.overrides = {}
+    assert api.models(limit=10)["failed"] == []
+
+
+def test_a_refused_key_or_a_total_outage_still_fails_the_gallery(api, meshy):
+    meshy.add("text-to-3d-preview", 74, model_urls={"glb": _asset(meshy, "a.glb")})
+    meshy.overrides = {_ROUTES["remesh"]: (401, {}, b"{}")}
+    err = _status(api.models, limit=10)
+    assert (err.status_code, err.detail) == (502, "Meshy rejected the API key")
+    # A refusal on a generic route every plan reads is the key's or the account's (an IP allowlist), not a product's.
+    meshy.overrides = {_ROUTES["image-to-3d"]: (403, {}, b'{"message": "ip_not_authorized"}')}
+    err = _status(api.models, limit=10)
+    assert err.status_code == 502 and "ip_not_authorized" in err.detail
+    # Nothing listed at all: the gallery says Meshy is down instead of showing an empty list with 29 notices.
+    meshy.overrides = {r: (503, {}, b"{}") for r in set(_ROUTES.values())}
+    assert _status(api.models, limit=10).detail == "Meshy API error 503"
+
+
+def test_details_keeps_the_recorded_lineage_when_only_meshys_record_fails(api, meshy):
+    """The Made-from panel (and the gallery's chat buttons, which read its session) is local provenance plus
+    Meshy's record: a plan-gated route or an outage on that one read leaves the recorded fields and names why;
+    a refused key still fails it."""
+    task = meshy.add("creative-lab-lamp-build", 75, model_urls={"glb": _asset(meshy, "l.glb")}, prompt="lamp")
+    (api.data / "provenance.json").write_text(json.dumps(
+        {task: {"tool": "meshy_creative_lab", "prompt": "a moon lamp", "session_id": "sess-1"}}), encoding="utf-8")
+    assert api.details(task)["remote_error"] is None  # route cached
+    meshy.overrides = {f"{_ROUTES['creative-lab-lamp-build']}/{task}": (403, {}, b'{"message": "plan lacks Creative Lab"}')}
+    got = api.details(task)
+    assert (got["prompt"], got["session_id"]) == ("a moon lamp", "sess-1")
+    assert got["remote_error"] == "Meshy refused the request: plan lacks Creative Lab"
+    meshy.overrides = {f"{_ROUTES['creative-lab-lamp-build']}/{task}": (502, {}, b"{}")}
+    assert (api.details(task)["session_id"], api.details(task)["remote_error"]) == ("sess-1", "Meshy API error 502")
+    meshy.overrides = {f"{_ROUTES['creative-lab-lamp-build']}/{task}": (401, {}, b"{}")}
+    assert _status(api.details, task).detail == "Meshy rejected the API key"

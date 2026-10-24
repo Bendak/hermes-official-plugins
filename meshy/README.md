@@ -175,6 +175,9 @@ you get, rendered with stock three.js:
   saved elsewhere (a project folder): a small per-profile index, `asset-index.json` in the plugin's
   data folder, holds path, size, sha256 and task id only (no URLs, no keys; 500 entries, vanished
   files drop out). Nothing scans your home folder.
+  A product Meshy refuses to list for your plan, or whose route is down, gets a one-line notice
+  naming it and the reason, and every other product still lists; only a rejected key (or Meshy
+  being down for every product) replaces the list with an error.
   Every row is labelled with the prompt that made it, and the search box filters by prompt.
   Selecting a model shows **Made from**: the prompt (copy it, or put it back in the chat box), the
   texture or style prompt, the source image for image models, settings, seed, credits, the chain of
