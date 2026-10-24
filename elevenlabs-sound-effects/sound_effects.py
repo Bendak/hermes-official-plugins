@@ -65,7 +65,8 @@ SCHEMA = {
     "description": (
         "Generate a sound effect with ElevenLabs (up to 30 s): foley, impacts, ambience, UI sounds, creature "
         "noises, stingers, drum loops. Describe it concretely (source, material, space, intensity), e.g. "
-        "'heavy wooden door creaking open in a stone hall'. Reply with the result's media_tag line to deliver "
+        "'heavy wooden door creaking open in a stone hall'; a length the user names goes in duration_seconds, "
+        "never in the prompt. Reply with the result's media_tag line to deliver "
         "the audio; in Hermes Desktop, when the result has desktop_card, reply with that line instead (a "
         "playable card). Billed to the user's ElevenLabs account."
     ),
@@ -75,8 +76,7 @@ SCHEMA = {
             "prompt": {"type": "string", "maxLength": MAX_PROMPT_CHARS, "description": "What the sound is."},
             "duration_seconds": {
                 "type": "number", "minimum": MIN_SECONDS, "maximum": MAX_SECONDS,
-                "description": ("Length in seconds. Set it whenever the user names a length (never in the "
-                                "prompt); omitted, ElevenLabs picks one at a higher flat price."),
+                "description": "Length in seconds; omitted, ElevenLabs picks one at a higher flat price.",
             },
             "loop": {"type": "boolean", "description": "Seamless loop (ambience, music beds)."},
             "prompt_influence": {"type": "number", "minimum": 0, "maximum": 1,
